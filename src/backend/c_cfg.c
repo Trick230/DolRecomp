@@ -258,18 +258,15 @@ bool c_function_cfg_build(CFunctionCFG* cfg, const PPCInst* insts, u32 count,
     cfg->leaders = (u8*)calloc(count ? count : 1u, sizeof(*cfg->leaders));
     cfg->block_cycles =
         (u32*)calloc(count ? count : 1u, sizeof(*cfg->block_cycles));
-    cfg->materialize_pc =
-        (u8*)malloc((count ? count : 1u) * sizeof(*cfg->materialize_pc));
     cfg->return_targets =
         (u8*)calloc(count ? count : 1u, sizeof(*cfg->return_targets));
     cfg->loop_ends =
         (u32*)malloc((count ? count : 1u) * sizeof(*cfg->loop_ends));
-    if (!cfg->leaders || !cfg->block_cycles || !cfg->materialize_pc ||
+    if (!cfg->leaders || !cfg->block_cycles ||
         !cfg->return_targets || !cfg->loop_ends) {
         c_function_cfg_destroy(cfg);
         return false;
     }
-    memset(cfg->materialize_pc, 1, count ? count : 1u);
     for (u32 i = 0; i < (count ? count : 1u); ++i)
         cfg->loop_ends[i] = UINT32_MAX;
 
@@ -310,11 +307,6 @@ bool c_function_cfg_build(CFunctionCFG* cfg, const PPCInst* insts, u32 count,
         }
         u32 first =
             (insts[last].branch_target - function_address) / 4u;
-        for (u32 i = first; i <= last; ++i) {
-            if (instruction_is_pc_transparent(&insts[i]))
-                cfg->materialize_pc[i] = 0;
-        }
-
         bool straight_line = true;
         bool outlinable = true;
         for (u32 i = first; i < last; ++i)
@@ -330,7 +322,6 @@ bool c_function_cfg_build(CFunctionCFG* cfg, const PPCInst* insts, u32 count,
 void c_function_cfg_destroy(CFunctionCFG* cfg) {
     free(cfg->leaders);
     free(cfg->block_cycles);
-    free(cfg->materialize_pc);
     free(cfg->return_targets);
     free(cfg->loop_ends);
     memset(cfg, 0, sizeof(*cfg));

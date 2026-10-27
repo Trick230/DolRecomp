@@ -34,9 +34,6 @@ static void test_integer_loop(void) {
           "charge loop blocks");
     check(c_function_cfg_can_loop_directly(&cfg, insts, BASE, 2),
           "keep integer backedge native");
-    check(!cfg.materialize_pc[0] && !cfg.materialize_pc[1] &&
-              !cfg.materialize_pc[2] && cfg.materialize_pc[3],
-          "elide PC stores inside pure integer loop");
     check(cfg.loop_ends[0] == 2, "extract straight-line integer loop");
     c_function_cfg_destroy(&cfg);
 }
@@ -55,8 +52,6 @@ static void test_timebase_loop(void) {
     check(insts[0].op == PPC_OP_MFTB, "decode timebase read");
     check(!c_function_cfg_can_loop_directly(&cfg, insts, BASE, 1),
           "yield before repeating a timebase read");
-    check(cfg.materialize_pc[0] && cfg.materialize_pc[1],
-          "materialize PC around timebase loop");
     c_function_cfg_destroy(&cfg);
 }
 
@@ -95,10 +90,6 @@ static void test_memory_loop(void) {
     CFunctionCFG cfg;
     check(c_function_cfg_build(&cfg, insts, 6, BASE), "build memory loop CFG");
     check(cfg.loop_ends[0] == 4, "extract ordinary RAM loop");
-    check(cfg.materialize_pc[0] && !cfg.materialize_pc[1] &&
-              !cfg.materialize_pc[2] && !cfg.materialize_pc[3] &&
-              !cfg.materialize_pc[4],
-          "materialize PC only for memory slow path");
     c_function_cfg_destroy(&cfg);
 }
 

@@ -217,6 +217,48 @@ static inline bool ppc_psq_store_inline(CPUState* cpu, u8 frS, u32 ea, bool w,
                                         u8 gqr, bool indexed, u32 cia) {
     return ppc_psq_store(cpu, frS, ea, w, gqr, indexed, cia);
 }
+
+/* Likewise for the memory accessors, which take the instruction address so a
+   hosting runtime can set ctx->pc only on its slow path, and for the
+   arithmetic FPU instructions, which a hosting runtime may give a fast path
+   for finite operands. */
+static inline u64 mem_read64_at(CPUState* cpu, u32 cia, u32 addr) { cpu->pc = cia; return mem_read64(cpu, addr); }
+static inline u32 mem_read32_at(CPUState* cpu, u32 cia, u32 addr) { cpu->pc = cia; return mem_read32(cpu, addr); }
+static inline u16 mem_read16_at(CPUState* cpu, u32 cia, u32 addr) { cpu->pc = cia; return mem_read16(cpu, addr); }
+static inline u8 mem_read8_at(CPUState* cpu, u32 cia, u32 addr) { cpu->pc = cia; return mem_read8(cpu, addr); }
+static inline void mem_write64_at(CPUState* cpu, u32 cia, u32 addr, u64 value) { cpu->pc = cia; mem_write64(cpu, addr, value); }
+static inline void mem_write32_at(CPUState* cpu, u32 cia, u32 addr, u32 value) { cpu->pc = cia; mem_write32(cpu, addr, value); }
+static inline void mem_write16_at(CPUState* cpu, u32 cia, u32 addr, u16 value) { cpu->pc = cia; mem_write16(cpu, addr, value); }
+static inline void mem_write8_at(CPUState* cpu, u32 cia, u32 addr, u8 value) { cpu->pc = cia; mem_write8(cpu, addr, value); }
+
+static inline void ppc_fadds_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_fadds(cpu, d, a, b); }
+static inline void ppc_fsubs_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_fsubs(cpu, d, a, b); }
+static inline void ppc_fmuls_inline(CPUState* cpu, u8 d, u8 a, u8 c) { ppc_fmuls(cpu, d, a, c); }
+static inline void ppc_fdivs_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_fdivs(cpu, d, a, b); }
+static inline void ppc_fadd_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_fadd(cpu, d, a, b); }
+static inline void ppc_fsub_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_fsub(cpu, d, a, b); }
+static inline void ppc_fmul_inline(CPUState* cpu, u8 d, u8 a, u8 c) { ppc_fmul(cpu, d, a, c); }
+static inline void ppc_fdiv_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_fdiv(cpu, d, a, b); }
+static inline void ppc_frsp_inline(CPUState* cpu, u8 d, u8 b) { ppc_frsp(cpu, d, b); }
+static inline void ppc_fcmp_inline(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered) { ppc_fcmp(cpu, crfd, a, b, ordered); }
+static inline bool ppc_fma_inline(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
+                                  bool subtract, bool negative, f64* output) {
+    return ppc_fma(cpu, a, c, b, single, subtract, negative, output);
+}
+static inline void ppc_ps_sub_inline(CPUState* cpu, u8 d, u8 a, u8 b) { ppc_ps_sub_op(cpu, d, a, b); }
+static inline void ppc_ps_mul_inline(CPUState* cpu, u8 d, u8 a, u8 c) { ppc_ps_mul_op(cpu, d, a, c); }
+static inline void ppc_ps_madd_inline(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool subtract, bool negative) {
+    ppc_ps_madd_op(cpu, d, a, c, b, subtract, negative);
+}
+static inline void ppc_ps_muls_inline(CPUState* cpu, u8 d, u8 a, u8 c, bool lane1) {
+    if (lane1) ppc_ps_muls1(cpu, d, a, c); else ppc_ps_muls0(cpu, d, a, c);
+}
+static inline void ppc_ps_madds_inline(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool lane1) {
+    if (lane1) ppc_ps_madds1(cpu, d, a, c, b); else ppc_ps_madds0(cpu, d, a, c, b);
+}
+static inline void ppc_ps_sum_inline(CPUState* cpu, u8 d, u8 a, u8 c, u8 b, bool lane1) {
+    if (lane1) ppc_ps_sum1(cpu, d, a, c, b); else ppc_ps_sum0(cpu, d, a, c, b);
+}
 u32 ppc_eciwx(CPUState* cpu, u32 ea, u32 cia);
 void ppc_ecowx(CPUState* cpu, u32 ea, u32 value, u32 cia);
 void ppc_tlbie(CPUState* cpu, u32 ea, u32 cia);

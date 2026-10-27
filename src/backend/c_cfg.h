@@ -10,7 +10,6 @@ typedef struct {
     u32 count;
     u8* leaders;
     u32* block_cycles;
-    u8* materialize_pc;
     u8* return_targets;
     u32* loop_ends;
 } CFunctionCFG;
