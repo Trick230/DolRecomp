@@ -514,7 +514,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         }
         if (local_target) {
             if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= 0) {\n");
+                fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, 0x%08Xu)) {\n",
+                        inst->branch_target);
                 fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
                 fprintf(out, "                return;\n");
                 fprintf(out, "            }\n");
@@ -529,7 +530,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     }
     if (local_backward) {
         if (direct_backedge) {
-            fprintf(out, "            if (ctx->downcount <= 0) {\n");
+            fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, 0x%08Xu)) {\n",
+                    inst->branch_target);
             fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "                return;\n");
             fprintf(out, "            }\n");
@@ -572,7 +574,7 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
         if (entry_dispatch) {
             fprintf(out, "            if (target - 0x%08Xu < 0x%08Xu) {\n", function_address,
                     function_end - function_address);
-            fprintf(out, "                if (ctx->downcount <= 0)\n");
+            fprintf(out, "                if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, target))\n");
             fprintf(out, "                    return;\n");
             fprintf(out, "                goto entry_dispatch_%08X;\n", function_address);
             fprintf(out, "            }\n");
@@ -647,7 +649,11 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#include DOLRECOMP_CPU_HEADER\n"
         "\n"
         "/* ctx->downcount is the cycles left before the runtime's next event:\n"
-        "   blocks subtract their cost, and loops leave once it runs out. */\n"
+        "   blocks subtract their cost. Once it runs out a loop backedge calls\n"
+        "   the safepoint with the pc it is about to branch to; the runtime runs\n"
+        "   its events there and returns 0 to go on, or nonzero (an interrupt to\n"
+        "   take, a stop or a savestate load) to leave for its dispatcher. */\n"
+        "int dolrecomp_safepoint(CPUState* ctx, u32 pc);\n"
         "\n"
         "/* A call between guest functions is a host call, so guest recursion is\n"
         "   host recursion. Past the limit a call site falls back to returning to\n"
@@ -2309,7 +2315,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     if (has_local_returns) {
         fprintf(out, "    return;\n");
         fprintf(out, "return_dispatch_%08X:\n", func_addr);
-        fprintf(out, "    if (ctx->downcount <= 0) return;\n");
+        fprintf(out, "    if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, ctx->pc)) return;\n");
         fprintf(out, "    switch (ctx->pc) {\n");
         for (u32 i = 0; i < count; ++i) {
             if (cfg.return_targets[i]) {
