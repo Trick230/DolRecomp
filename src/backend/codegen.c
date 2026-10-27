@@ -1,5 +1,6 @@
 #include "backend/codegen.h"
 #include "backend/emitter.h"
+#include "platform/fs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,11 +27,10 @@ typedef struct {
 } WorkerQueue;
 
 int emit_chunk_file(const ChunkJob* job) {
-    FILE* chunk = fopen(job->path, "w+");
-    if (!chunk) {
-        fprintf(stderr, "error: can't open output '%s'\n", job->path);
+    OutputFile output;
+    if (!output_open(&output, job->path, "w+"))
         return 0;
-    }
+    FILE* chunk = output.stream;
 
     fprintf(chunk, "// DolRecomp output\n");
     fprintf(chunk, "#include \"../%s\"\n\n", job->include_name);
@@ -38,17 +38,10 @@ int emit_chunk_file(const ChunkJob* job) {
     // function here loads it once into a local (emit_flat_base).
     fprintf(chunk, "#undef PPC_FLAT_BASE\n#define PPC_FLAT_BASE(cpu) dolrecomp_base\n\n");
     if (!emit_function(chunk, job->insts, job->count, job->func_addr)) {
-        fclose(chunk);
-        remove(job->path);
+        output_discard(&output);
         return 0;
     }
-
-    if (fclose(chunk) != 0) {
-        fprintf(stderr, "error: failed writing '%s'\n", job->path);
-        return 0;
-    }
-
-    return 1;
+    return output_close(&output);
 }
 
 int queue_init(WorkerQueue* queue, const void* jobs, size_t job_size,

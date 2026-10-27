@@ -134,3 +134,69 @@ int path_is_directory(const char* path) {
 #endif
 }
 
+
+int output_open(OutputFile* out, const char* path, const char* mode) {
+    out->stream = NULL;
+    const int length = snprintf(out->path, sizeof(out->path), "%s", path);
+    if (length < 0 || (size_t)length >= sizeof(out->path)) {
+        fprintf(stderr, "error: output path is too long: '%s'\n", path);
+        return 0;
+    }
+    snprintf(out->temp, sizeof(out->temp), "%s.tmp", path);
+    out->stream = fopen(out->temp, mode);
+    if (!out->stream) {
+        fprintf(stderr, "error: can't open output '%s'\n", out->temp);
+        return 0;
+    }
+    return 1;
+}
+
+static int same_contents(const char* a, const char* b) {
+    FILE* fa = fopen(a, "rb");
+    FILE* fb = fopen(b, "rb");
+    int same = fa && fb;
+    char ba[65536], bb[65536];
+    while (same) {
+        const size_t na = fread(ba, 1, sizeof(ba), fa);
+        const size_t nb = fread(bb, 1, sizeof(bb), fb);
+        same = na == nb && memcmp(ba, bb, na) == 0;
+        if (na < sizeof(ba))
+            break;
+    }
+    if (fa)
+        fclose(fa);
+    if (fb)
+        fclose(fb);
+    return same;
+}
+
+int output_close(OutputFile* out) {
+    const int written = fclose(out->stream) == 0;
+    out->stream = NULL;
+    if (!written) {
+        fprintf(stderr, "error: can't write '%s'\n", out->temp);
+        remove(out->temp);
+        return 0;
+    }
+    if (same_contents(out->temp, out->path)) {
+        remove(out->temp);
+        return 1;
+    }
+#ifdef _WIN32
+    const int moved = MoveFileExA(out->temp, out->path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    const int moved = rename(out->temp, out->path) == 0;
+#endif
+    if (!moved) {
+        fprintf(stderr, "error: can't replace '%s'\n", out->path);
+        remove(out->temp);
+    }
+    return moved;
+}
+
+void output_discard(OutputFile* out) {
+    if (out->stream)
+        fclose(out->stream);
+    out->stream = NULL;
+    remove(out->temp);
+}

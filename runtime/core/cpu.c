@@ -183,11 +183,9 @@ void ppc_lazy_fp_set_enabled(bool enabled) {
    generated code does not pay a call per FPU instruction to learn that MSR[FP]
    is set, which it almost always is. */
 /* Depth of the generated code's native call chain. Cross-chunk direct calls
-   turn guest recursion into host recursion, and the chunk headers declare this
-   extern so all ~180 chunk translation units share one counter -- as a static
-   in the header each would get its own and the guard would bound nothing.
-   It lives here because the C backend compiles only chunks/*.c, so generated.c
-   is not linked and cannot hold the definition. */
+   turn guest recursion into host recursion, and the generated header declares
+   this extern so every chunk shares one counter -- as a static in the header
+   each translation unit would get its own and the guard would bound nothing. */
 unsigned dolrecomp_call_depth = 0;
 
 /* Cross-chunk direct calls: per-chunk "may enter directly" flags and the
