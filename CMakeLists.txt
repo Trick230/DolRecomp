@@ -12,9 +12,11 @@ if(DOLRECOMP_ENABLE_LLVM)
     set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     find_package(LLVM CONFIG REQUIRED)
-    if(LLVM_PACKAGE_VERSION VERSION_LESS 19 OR LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL 21)
+    if(LLVM_PACKAGE_VERSION VERSION_LESS 19 OR LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL 23)
         message(FATAL_ERROR "DolRecomp LLVM backend requires LLVM 19 or 20 (found ${LLVM_PACKAGE_VERSION})")
     endif()
+    # LLVM 21+ exports the definitions as one space-separated string.
+    separate_arguments(DOLRECOMP_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 endif()
 
 # Portable warnings for local development and CI.
@@ -128,7 +130,7 @@ if(DOLRECOMP_ENABLE_LLVM)
     target_include_directories(dr_llvm PUBLIC ${DOLRECOMP_SRC})
     target_include_directories(dr_llvm SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(dr_llvm PUBLIC DOLRECOMP_ENABLE_LLVM=1)
-    target_compile_definitions(dr_llvm PRIVATE ${LLVM_DEFINITIONS})
+    target_compile_definitions(dr_llvm PRIVATE ${DOLRECOMP_LLVM_DEFINITIONS})
     target_link_libraries(dr_llvm PUBLIC dr_ir)
     
     set(DOLRECOMP_LLVM_COMPONENTS
@@ -372,7 +374,7 @@ if(DOLRECOMP_ENABLE_LLVM)
     add_executable(llvm_ir_test tests/llvm_ir_test.cpp)
     target_include_directories(llvm_ir_test SYSTEM PRIVATE
         ${LLVM_INCLUDE_DIRS})
-    target_compile_definitions(llvm_ir_test PRIVATE ${LLVM_DEFINITIONS})
+    target_compile_definitions(llvm_ir_test PRIVATE ${DOLRECOMP_LLVM_DEFINITIONS})
     target_link_libraries(llvm_ir_test PRIVATE dr_llvm)
     add_test(NAME llvm_ir COMMAND llvm_ir_test
              ${CMAKE_CURRENT_BINARY_DIR}/dolir_test.ll

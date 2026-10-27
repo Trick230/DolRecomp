@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/intrinsics.h"
 #include "cpu/cpu.h"
 
 #include <llvm/ADT/SmallVector.h>
@@ -58,7 +59,7 @@ bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
     Value *jumped = nullptr;
     if (intrinsic_escapes_) {
       Value *frame =
-          builder_.CreateCall(Intrinsic::getDeclaration(
+          builder_.CreateCall(intrinsicDeclaration(
                                   &module_, Intrinsic::frameaddress, {pointer}),
                               {builder_.getInt32(0)});
       builder_.CreateStore(
@@ -66,13 +67,13 @@ bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
           builder_.CreateInBoundsGEP(
               bufferTy, buffer, {builder_.getInt64(0), builder_.getInt64(0)}));
       Value *stack = builder_.CreateCall(
-          Intrinsic::getDeclaration(&module_, Intrinsic::stacksave, {pointer}));
+          intrinsicDeclaration(&module_, Intrinsic::stacksave, {pointer}));
       builder_.CreateStore(
           stack,
           builder_.CreateInBoundsGEP(
               bufferTy, buffer, {builder_.getInt64(0), builder_.getInt64(2)}));
       jumped = builder_.CreateCall(
-          Intrinsic::getDeclaration(&module_, Intrinsic::eh_sjlj_setjmp),
+          intrinsicDeclaration(&module_, Intrinsic::eh_sjlj_setjmp),
           {buffer});
     } else {
       auto setjmp = module_.getOrInsertFunction(

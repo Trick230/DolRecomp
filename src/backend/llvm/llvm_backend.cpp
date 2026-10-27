@@ -158,7 +158,11 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
 
   LLVMContext context;
   Module module("dolrecomp_native", context);
+#if LLVM_VERSION_MAJOR >= 21
+  module.setTargetTriple(Triple(profile.triple));
+#else
   module.setTargetTriple(profile.triple);
+#endif
   module.setDataLayout(machine->createDataLayout());
   module.setSourceFileName("dolrecomp://deterministic/module");
   std::string text;

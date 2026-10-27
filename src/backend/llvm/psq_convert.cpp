@@ -1,4 +1,5 @@
 #include "backend/llvm/psq_convert.h"
+#include "backend/llvm/intrinsics.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Intrinsics.h>
@@ -33,7 +34,7 @@ Value *extendPSQFloat(IRBuilder<> &builder, Module &module, Value *bits) {
           builder.CreateShl(
               builder.CreateAnd(x, builder.getInt64(0x3fffffffULL)), 29)));
 
-  Function *ctlz = Intrinsic::getDeclaration(&module, Intrinsic::ctlz, {i32});
+  Function *ctlz = intrinsicDeclaration(&module, Intrinsic::ctlz, {i32});
   Value *leading = builder.CreateCall(ctlz, {fraction, builder.getInt1(false)});
   Value *shift = builder.CreateSub(leading, builder.getInt32(8));
   Value *shiftedFraction = builder.CreateShl(fraction, shift);

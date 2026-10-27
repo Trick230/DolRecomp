@@ -336,6 +336,11 @@ void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia) {
    is not linked and cannot hold the definition. */
 unsigned dolrecomp_call_depth = 0;
 
+/* Cross-chunk direct calls: per-chunk "may enter directly" flags and the
+   idle-loop pc, both owned by the host. NULL keeps every call on the host. */
+const unsigned char* dolrecomp_direct_ok = NULL;
+u32 dolrecomp_idle_pc = 0;
+
 bool ppc_fp_available(CPUState* cpu, u32 cia) {
     if (cpu->msr & PPC_MSR_FP)
         return true;

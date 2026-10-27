@@ -323,12 +323,12 @@ void emit_set_chunk_table(const u32* starts, u32 count) {
     g_chunk_count = count ? count : 0;
 }
 
-// The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
-// the text sections but the first one does not start on the common stride, so
-// this binary-searches rather than dividing.
-static u32 chunk_start_for(u32 addr) {
+// The index of the chunk whose func_<start>() covers `addr`, or -1 if none
+// does. Chunks tile the text sections but the first one does not start on the
+// common stride, so this binary-searches rather than dividing.
+static s32 chunk_index_for(u32 addr) {
     if (!g_chunk_starts || !g_chunk_count)
-        return 0;
+        return -1;
     u32 lo = 0, hi = g_chunk_count;
     while (lo < hi) {
         u32 mid = lo + (hi - lo) / 2u;
@@ -337,7 +337,7 @@ static u32 chunk_start_for(u32 addr) {
         else
             hi = mid;
     }
-    return lo ? g_chunk_starts[lo - 1u] : 0;
+    return lo ? (s32)(lo - 1u) : -1;
 }
 
 
@@ -345,6 +345,12 @@ static u32 chunk_start_for(u32 addr) {
 // returning to the chassis. The chassis round trip costs two rel-section scans,
 // two IsHostCallAddress hash lookups, a ModManager dispatch and a downcount
 // flush, none of which a same-module call needs.
+//
+// The chassis validates guest code at dispatch boundaries (a chunk is hashed
+// on first entry and retired on self-modifying code), so it publishes which
+// chunks may be entered directly in dolrecomp_direct_ok, indexed like the
+// module's chunk table; NULL, the default, keeps every call on the chassis.
+// It also publishes its idle-loop pc, which must keep returning to it.
 //
 // Resume inline only if the callee came back to the instruction after the call.
 // Any other pc means it stopped early -- budget exhausted, an exception, a
@@ -355,21 +361,25 @@ static u32 chunk_start_for(u32 addr) {
 static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
                                   u32 func_start, u32 func_end) {
     u32 continuation = inst->address + 4u;
-    u32 target_chunk = chunk_start_for(inst->branch_target);
-    if (!target_chunk)
+    s32 target_chunk = chunk_index_for(inst->branch_target);
+    if (target_chunk < 0)
         return false;
     // Without a local continuation label there is nothing to resume into, so
     // the call would buy nothing over the plain return.
     if (!branch_target_is_local(func_start, func_end, continuation))
         return false;
 
+    u32 target_start = g_chunk_starts[target_chunk];
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
-    fprintf(out, "            if (dolrecomp_call_enter()) {\n");
-    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_chunk);
-    fprintf(out, "                func_%08X(ctx);\n", target_chunk);
+    fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] &&\n",
+            target_chunk);
+    fprintf(out, "                dolrecomp_call_enter()) {\n");
+    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_start);
+    fprintf(out, "                func_%08X(ctx);\n", target_start);
     fprintf(out, "                dolrecomp_call_leave();\n");
-    fprintf(out, "                if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
+    fprintf(out, "                if (ctx->pc == 0x%08Xu && dolrecomp_idle_pc != 0x%08Xu)\n",
             continuation, continuation);
+    fprintf(out, "                    goto label_%08X;\n", continuation);
     fprintf(out, "            }\n");
     fprintf(out, "            return;\n");
     return true;
@@ -509,6 +519,9 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#define DOLRECOMP_C_MAX_CALL_DEPTH 24\n"
         "#endif\n"
         "extern unsigned dolrecomp_call_depth;\n"
+        "/* Published by the host; see emit_cross_chunk_call in DolRecomp. */\n"
+        "extern const unsigned char* dolrecomp_direct_ok;\n"
+        "extern u32 dolrecomp_idle_pc;\n"
         "static inline int dolrecomp_call_enter(void) {\n"
         "    if (dolrecomp_call_depth >= (unsigned)DOLRECOMP_C_MAX_CALL_DEPTH)\n"
         "        return 0;\n"
@@ -1607,9 +1620,22 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "    }\n");
         break;
 
+    // Data-cache block ops change no register state, so they stay inside the
+    // block: the host decides what a flush means (Dolphin without dcache
+    // emulation only drops stale icache lines). DCFlushRange-style loops then
+    // run natively instead of leaving the block on every 32-byte line.
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
     case PPC_OP_DCBI:
+        fprintf(out, "    {\n        u32 ea = ");
+        emit_xform_ea(out, inst->rA, inst->rB, false);
+        fprintf(out, ";\n        ppc_cache_control(ctx, %s, ea, 0x%08Xu);\n",
+                inst->op == PPC_OP_DCBST ? "PPC_CACHE_DCBST" :
+                inst->op == PPC_OP_DCBF ? "PPC_CACHE_DCBF" : "PPC_CACHE_DCBI",
+                inst->address);
+        fprintf(out, "        if (ctx->exception) return;\n    }\n");
+        break;
+
     case PPC_OP_ICBI:
         fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
                 inst->raw, inst->address);

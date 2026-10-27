@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/intrinsics.h"
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
@@ -199,7 +200,7 @@ void FunctionEmitter::returnNative(Value *pc) {
     BasicBlock *escape =
         BasicBlock::Create(context_, "return_escape", function_);
     Value *matches = builder_.CreateICmpEQ(pc, return_pc_);
-    Function *expect = Intrinsic::getDeclaration(&module_, Intrinsic::expect,
+    Function *expect = intrinsicDeclaration(&module_, Intrinsic::expect,
                                                  {Type::getInt1Ty(context_)});
     matches = builder_.CreateCall(expect, {matches, builder_.getTrue()});
     builder_.CreateCondBr(matches, normal, escape);

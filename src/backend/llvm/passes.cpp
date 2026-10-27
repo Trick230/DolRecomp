@@ -1,5 +1,6 @@
 #include "backend/llvm/passes.h"
 
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/IR/Module.h>
@@ -35,10 +36,16 @@ bool optimizeModule(Module &module, TargetMachine &machine,
   std::optional<PGOOptions> pgo;
   if (options.profile_generate_path && options.profile_generate_path[0]) {
     pgo.emplace(options.profile_generate_path, "", "", "",
-                vfs::getRealFileSystem(), PGOOptions::IRInstr);
+#if LLVM_VERSION_MAJOR < 21
+                vfs::getRealFileSystem(),
+#endif
+                PGOOptions::IRInstr);
   } else if (options.profile_use_path && options.profile_use_path[0]) {
     pgo.emplace(options.profile_use_path, "", "", "",
-                vfs::getRealFileSystem(), PGOOptions::IRUse);
+#if LLVM_VERSION_MAJOR < 21
+                vfs::getRealFileSystem(),
+#endif
+                PGOOptions::IRUse);
   }
   PassBuilder builder(&machine, tuning, pgo);
   builder.registerModuleAnalyses(modules);

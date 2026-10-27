@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/intrinsics.h"
 
 #include "backend/llvm/fp_fixups.h"
 
@@ -112,7 +113,7 @@ Value *FunctionEmitter::constrainedPairFMA(Value *left, Value *multiplier,
         builder_.CreateShuffleVector(multiplier, zero, {0, 1, 2, 3});
     Value *wideAddend =
         builder_.CreateShuffleVector(addend, zero, {0, 1, 2, 3});
-    Function *wideFMA = Intrinsic::getDeclaration(
+    Function *wideFMA = intrinsicDeclaration(
         &module_, Intrinsic::experimental_constrained_fma,
         {wideLeft->getType()});
     Value *wide = builder_.CreateConstrainedFPCall(
@@ -121,7 +122,7 @@ Value *FunctionEmitter::constrainedPairFMA(Value *left, Value *multiplier,
     return builder_.CreateShuffleVector(wide, PoisonValue::get(wide->getType()),
                                         {0, 1}, "ps.fma.pair");
   }
-  Function *fma = Intrinsic::getDeclaration(
+  Function *fma = intrinsicDeclaration(
       &module_, Intrinsic::experimental_constrained_fma, {left->getType()});
   return builder_.CreateConstrainedFPCall(fma, {left, multiplier, addend},
                                           "ps.fma", RoundingMode::Dynamic,

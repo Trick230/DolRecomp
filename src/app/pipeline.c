@@ -1398,10 +1398,30 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             file_count++;
         }
 
+        // Hand the emitter every chunk entry known so far so a cross-chunk bl
+        // becomes a guarded direct call (see emit_cross_chunk_call). Its index
+        // must match the module's chunk table, which sorts every chunk by
+        // address, so only an ascending chunk list is handed over; a target in
+        // a later section is not known yet and keeps the chassis round trip.
+        u32* chunk_starts = NULL;
+        bool chunks_ascending = true;
+        for (u32 i = 1; i < funcs.count; ++i)
+            chunks_ascending &= funcs.ranges[i - 1u].start < funcs.ranges[i].start;
+        if (chunks_ascending && funcs.count)
+            chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
+        if (chunk_starts) {
+            for (u32 i = 0; i < funcs.count; ++i)
+                chunk_starts[i] = funcs.ranges[i].start;
+            emit_set_chunk_table(chunk_starts, funcs.count);
+        }
+
         u32 active_jobs = effective_chunk_jobs(section_job_count, jobs);
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
-        if (!run_chunk_jobs(chunk_jobs, section_job_count, jobs)) {
+        bool chunks_written = run_chunk_jobs(chunk_jobs, section_job_count, jobs);
+        emit_set_chunk_table(NULL, 0);
+        free(chunk_starts);
+        if (!chunks_written) {
             smc_analysis_free(&smc);
             function_list_free(&funcs);
             free(chunk_jobs);

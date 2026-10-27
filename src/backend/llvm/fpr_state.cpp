@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/intrinsics.h"
 
 #include "backend/llvm/fp_fixups.h"
 
@@ -130,7 +131,7 @@ Value *FunctionEmitter::forcePairedMultiplierPrecision(Value *pair) {
 
   builder_.SetInsertPoint(rare);
   Function *ctlz =
-      Intrinsic::getDeclaration(&module_, Intrinsic::ctlz, {integerPair});
+      intrinsicDeclaration(&module_, Intrinsic::ctlz, {integerPair});
   Value *leading =
       builder_.CreateCall(ctlz, {fraction, ConstantInt::getFalse(context_)});
   Value *shift = builder_.CreateSub(leading, splat(11));

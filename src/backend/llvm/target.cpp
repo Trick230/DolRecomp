@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 
+#include <llvm/Config/llvm-config.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
@@ -126,7 +127,12 @@ createTargetMachine(const TargetProfile &profile, int optimization_level,
                     DolLLVMSemantics semantics,
                     std::string &error) {
   initializeTargets();
-  const Target *target = TargetRegistry::lookupTarget(profile.triple, error);
+#if LLVM_VERSION_MAJOR >= 21
+  const Triple triple(profile.triple);
+#else
+  const std::string &triple = profile.triple;
+#endif
+  const Target *target = TargetRegistry::lookupTarget(triple, error);
   if (!target)
     return nullptr;
   TargetOptions options;
@@ -134,7 +140,7 @@ createTargetMachine(const TargetProfile &profile, int optimization_level,
                                 ? FPOpFusion::Fast
                                 : FPOpFusion::Strict;
   return std::unique_ptr<TargetMachine>(target->createTargetMachine(
-      profile.triple, profile.cpu, profile.features, options, Reloc::PIC_,
+      triple, profile.cpu, profile.features, options, Reloc::PIC_,
       std::nullopt, codegenLevel(optimization_level)));
 }
 

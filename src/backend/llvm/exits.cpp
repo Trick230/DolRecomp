@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/intrinsics.h"
 #include "cpu/cpu.h"
 
 #include <llvm/IR/BasicBlock.h>
@@ -69,7 +70,7 @@ void FunctionEmitter::emitEntry() {
   BasicBlock *query =
       BasicBlock::Create(context_, "interception_query", function_);
   Value *hostCall = loadOffset(pointer, offsetof(CPUState, host_call));
-  Function *expect = Intrinsic::getDeclaration(&module_, Intrinsic::expect,
+  Function *expect = intrinsicDeclaration(&module_, Intrinsic::expect,
                                                {Type::getInt1Ty(context_)});
   Value *noInterception = builder_.CreateCall(
       expect, {builder_.CreateIsNull(hostCall), builder_.getTrue()});
@@ -101,7 +102,7 @@ void FunctionEmitter::emitEntry() {
   mem2_ = loadOffset(pointer, offsetof(CPUState, exram));
   mem2_size_ =
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
-  Function *assume = Intrinsic::getDeclaration(&module_, Intrinsic::assume);
+  Function *assume = intrinsicDeclaration(&module_, Intrinsic::assume);
   Value *ramSizeValid =
       fixed_memory_layout_
           ? builder_.CreateICmpEQ(ram_size_,
@@ -204,7 +205,7 @@ void FunctionEmitter::returnFromBody() {
       Value *buffer = builder_.CreateStructGEP(chainType(), chain_, 0);
       if (intrinsic_escapes_) {
         builder_.CreateCall(
-            Intrinsic::getDeclaration(&module_, Intrinsic::eh_sjlj_longjmp),
+            intrinsicDeclaration(&module_, Intrinsic::eh_sjlj_longjmp),
             {buffer});
       } else {
         auto longjmp = module_.getOrInsertFunction(

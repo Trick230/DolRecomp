@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/intrinsics.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
@@ -77,7 +78,7 @@ Value *FunctionEmitter::bswap(Value *value) {
   if (integer->getBitWidth() == 8)
     return value;
   Function *intrinsic =
-      Intrinsic::getDeclaration(&module_, Intrinsic::bswap, {value->getType()});
+      intrinsicDeclaration(&module_, Intrinsic::bswap, {value->getType()});
   return builder_.CreateCall(intrinsic, {value});
 }
 
@@ -141,14 +142,14 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     break;
   case DOLIR_OP_ROTL: {
     Function *intrinsic =
-        Intrinsic::getDeclaration(&module_, Intrinsic::fshl, {resultType});
+        intrinsicDeclaration(&module_, Intrinsic::fshl, {resultType});
     result = builder_.CreateCall(
         intrinsic, {operand(inst, 0), operand(inst, 0), operand(inst, 1)});
     break;
   }
   case DOLIR_OP_CLZ: {
     Function *intrinsic =
-        Intrinsic::getDeclaration(&module_, Intrinsic::ctlz, {resultType});
+        intrinsicDeclaration(&module_, Intrinsic::ctlz, {resultType});
     result = builder_.CreateCall(
         intrinsic, {operand(inst, 0), ConstantInt::getFalse(context_)});
     break;
@@ -212,7 +213,7 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     break;
   case DOLIR_OP_FABS: {
     Function *intrinsic =
-        Intrinsic::getDeclaration(&module_, Intrinsic::fabs, {resultType});
+        intrinsicDeclaration(&module_, Intrinsic::fabs, {resultType});
     result = builder_.CreateCall(intrinsic, {operand(inst, 0)});
     break;
   }

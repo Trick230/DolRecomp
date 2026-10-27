@@ -7,9 +7,6 @@
 
 static bool instruction_uses_fallback(const PPCInst* inst) {
     switch (inst->op) {
-    case PPC_OP_DCBST:
-    case PPC_OP_DCBF:
-    case PPC_OP_DCBI:
     case PPC_OP_ICBI:
     case PPC_OP_UNKNOWN:
         return true;
@@ -101,6 +98,9 @@ static u32 instruction_cycles(const PPCInst* inst) {
     case PPC_OP_DIVWUO:
         return 40;
     case PPC_OP_DCBZ:
+    case PPC_OP_DCBST:
+    case PPC_OP_DCBF:
+    case PPC_OP_DCBI:
         return 5;
     case PPC_OP_DCBTST:
     case PPC_OP_DCBT:

@@ -1,4 +1,5 @@
 #include "backend/llvm/fp_fixups.h"
+#include "backend/llvm/intrinsics.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
@@ -172,7 +173,7 @@ Function *getPairFMARoundingFixup(Module &module) {
   Value *addend = &*argument;
   BasicBlock *entry = BasicBlock::Create(context, "entry", fixup);
   IRBuilder<> builder(entry);
-  Function *fma = Intrinsic::getDeclaration(
+  Function *fma = intrinsicDeclaration(
       &module, Intrinsic::experimental_constrained_fma, {pairType});
   auto binary = [&](Intrinsic::ID id, Value *a, Value *b) {
     return builder.CreateConstrainedFPBinOp(
