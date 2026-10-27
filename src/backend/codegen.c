@@ -34,6 +34,9 @@ int emit_chunk_file(const ChunkJob* job) {
 
     fprintf(chunk, "// DolRecomp output\n");
     fprintf(chunk, "#include \"../%s\"\n\n", job->include_name);
+    // Flat-memory runtimes take guest memory's base from PPC_FLAT_BASE; each
+    // function here loads it once into a local (emit_flat_base).
+    fprintf(chunk, "#undef PPC_FLAT_BASE\n#define PPC_FLAT_BASE(cpu) dolrecomp_base\n\n");
     if (!emit_function(chunk, job->insts, job->count, job->func_addr)) {
         fclose(chunk);
         remove(job->path);
