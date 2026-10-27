@@ -25,16 +25,13 @@ extern "C" {
 //   used as a fast path for host-backed external memory such as locked cache.
 // - Do not insert fields into the mirrored prefix without coordinating a
 //   generated-code ABI bump with DolRecomp.
-// - ABI v2 adds `downcount` at the tail: a guest-cycle charge accumulator.
-//   Generated code subtracts each basic block's Gekko cycle cost (mirroring
-//   Dolphin's PPCTables costs) at block entry; the embedding environment
-//   consumes and resets it (Dolphin chassis: per-dispatch flush into
-//   ppc_state.downcount). Hosts that do not meter guest time may ignore it
-//   (s64: it cannot wrap in any realistic session).
-// - ABI v4 adds `cycle_budget` directly after `downcount`, mirroring the
-//   field DolRecomp added to its generated-code CPUState in f0a86be. The
-//   prefix is shared with generated code, so the field must sit at the same
-//   offset on both sides; hosts that do not meter guest time may ignore it.
+// - ABI v2 adds `downcount` at the tail: the cycles left before the host's
+//   next event. Generated code subtracts each basic block's Gekko cycle cost
+//   (mirroring Dolphin's PPCTables costs) at block entry and calls
+//   dolrecomp_safepoint at a loop once it runs out. Hosts that do not meter
+//   guest time may ignore it (s64: it cannot wrap in any realistic session).
+// - ABI v4 added `cycle_budget` after `downcount`; nothing used it, and ABI v8
+//   drops it.
 // - ABI v5 appends the `fast_read`/`fast_write` RAM slice tables, which the
 //   host fills with ppc_build_fast_memory() once `ram`/`exram` are set.
 // - ABI v6 appends `cache_range`: one dcbf/dcbst/dcbi over `lines`
@@ -184,7 +181,6 @@ struct CPUState {
     u32 ram_size;
     PPCExternalPointer external_pointer;
     s64 downcount;
-    s64 cycle_budget;
     u8* exram;
     u32 exram_size;
     PPCSPRRead spr_read;

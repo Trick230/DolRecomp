@@ -222,7 +222,7 @@ static int emit_sections(const Module* module, const char* out_dir, u32 entry_po
         bounds[function_count + i] = analysis->functions[i].end;
         fprintf(header, "void func_%08X(CPUState* ctx);\n", analysis->functions[i].start);
     }
-    emit_set_chunk_table(bounds, bounds + function_count, function_count);
+    emit_set_function_table(bounds, bounds + function_count, function_count);
 
     u32 job_count = 0;
     for (u32 s = 0; ok && s < module->section_count; s++) {
@@ -254,7 +254,7 @@ static int emit_sections(const Module* module, const char* out_dir, u32 entry_po
     printf("writing %u functions in %u chunks with %u jobs\n", function_count, job_count,
            effective_chunk_jobs(job_count, threads));
     ok = ok && run_chunk_jobs(jobs, job_count, threads);
-    emit_set_chunk_table(NULL, NULL, 0);
+    emit_set_function_table(NULL, NULL, 0);
     emit_footer(header);
 
     for (u32 i = 0; i < module->section_count; i++)

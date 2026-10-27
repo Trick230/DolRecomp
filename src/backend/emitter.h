@@ -17,16 +17,16 @@ typedef enum {
 void emit_header(FILE* out);
 void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 
-// Register chunk entries for the opt-in cross-chunk direct-call experiment.
-// Direct calls bypass chassis dispatch checks and must not be enabled by a
-// runtime that validates mutable guest code there. Call before worker emission;
-// passing count == 0 restores the safe return-to-chassis form.
-void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count);
+// The module's functions, sorted, in the order of the runtime's function
+// table: a call to one is a direct C call guarded by its dolrecomp_direct_ok
+// flag. Call before worker emission; passing count == 0 sends every call back
+// to the runtime.
+void emit_set_function_table(const u32* starts, const u32* ends, u32 count);
 
 // A guest function with a host implementation, `bool name(CPUState*)`, that
 // the module links in. It returns true after doing the whole call (registers,
 // memory, cycles) and false, with no side effects, when the guest code has to
-// run instead. Same lifetime rules as the chunk table; sorted by address.
+// run instead. Same lifetime rules as the function table; sorted by address.
 // A `jump` native ends somewhere other than its return address (a context
 // load ending in rfi): it sets ctx->pc itself and its callers go back to the
 // dispatcher instead of resuming after the call.
@@ -38,7 +38,7 @@ typedef struct {
 void emit_set_natives(const DolRecompNative* natives, u32 count);
 
 // Every address code outside a function may enter it at, sorted (same lifetime
-// rules as the chunk table). With it set, a function's entry switch keeps only
+// rules as the function table). With it set, a function's entry switch keeps only
 // those, its block leaders and the resume points after its own exits, so the
 // compiler can optimize across the instructions in between; a runtime entering
 // anywhere else finds no case and must step that instruction itself.

@@ -308,17 +308,17 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
     return target >= func_start && target < func_end && ((target - func_start) & 3u) == 0;
 }
 
-// Chunk entry addresses, sorted. Written once before the worker pool starts and
-// read-only thereafter, so no locking. NULL means "no table": every cross-chunk
-// branch takes the safe return-to-runtime path.
-static const u32* g_chunk_starts = NULL;
-static const u32* g_chunk_ends = NULL;
-static u32 g_chunk_count = 0;
+// The module's function ranges, sorted. Written once before the worker pool
+// starts and read-only thereafter, so no locking. NULL means "no table": every
+// call takes the safe return-to-runtime path.
+static const u32* g_function_starts = NULL;
+static const u32* g_function_ends = NULL;
+static u32 g_function_count = 0;
 
-void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count) {
-    g_chunk_starts = count ? starts : NULL;
-    g_chunk_ends = count ? ends : NULL;
-    g_chunk_count = count ? count : 0;
+void emit_set_function_table(const u32* starts, const u32* ends, u32 count) {
+    g_function_starts = count ? starts : NULL;
+    g_function_ends = count ? ends : NULL;
+    g_function_count = count ? count : 0;
 }
 
 static const DolRecompNative* g_natives = NULL;
@@ -364,29 +364,28 @@ static const DolRecompNative* native_for(u32 addr) {
     return lo < g_native_count && g_natives[lo].address == addr ? &g_natives[lo] : NULL;
 }
 
-// The index of the chunk whose func_<start>() covers `addr`, or -1 if none
-// does. Chunks tile the text sections but the first one does not start on the
-// common stride, so this binary-searches rather than dividing.
-static s32 chunk_index_for(u32 addr) {
-    if (!g_chunk_starts || !g_chunk_count)
+// The index of the function whose func_<start>() covers `addr`, or -1 if none
+// does.
+static s32 function_index_for(u32 addr) {
+    if (!g_function_starts || !g_function_count)
         return -1;
-    u32 lo = 0, hi = g_chunk_count;
+    u32 lo = 0, hi = g_function_count;
     while (lo < hi) {
         u32 mid = lo + (hi - lo) / 2u;
-        if (g_chunk_starts[mid] <= addr)
+        if (g_function_starts[mid] <= addr)
             lo = mid + 1u;
         else
             hi = mid;
     }
-    if (!lo || addr >= g_chunk_ends[lo - 1u])
+    if (!lo || addr >= g_function_ends[lo - 1u])
         return -1;
     return (s32)(lo - 1u);
 }
 
 
-// Enter the module at a run-time target through the host's line table, then
+// Enter the module at a run-time target through the runtime's lookup, then
 // resume at `continuation` if the callee came back there (see
-// emit_cross_chunk_call for why any other pc returns to the runtime).
+// emit_direct_call for why any other pc returns to the runtime).
 static void emit_indirect_resume(FILE* out, const char* target, u32 continuation) {
     fprintf(out, "            if (dolrecomp_enter_indirect(ctx, %s) &&\n", target);
     fprintf(out, "                ctx->pc == 0x%08Xu && dolrecomp_idle_pc != 0x%08Xu)\n",
@@ -397,7 +396,7 @@ static void emit_indirect_resume(FILE* out, const char* target, u32 continuation
 // A branch out of the function that does not link is a tail call: the callee
 // returns to our caller, so enter it directly and then leave with whatever pc
 // it stopped at. A native target runs in place and returns through the lr.
-static void emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
+static void emit_tail_call(FILE* out, const PPCInst* inst) {
     const u32 target = inst->branch_target;
     const DolRecompNative* native = native_for(target);
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", target);
@@ -411,13 +410,13 @@ static void emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
         fprintf(out, "                }\n");
         fprintf(out, "            }\n");
     }
-    const s32 target_chunk = chunk_index_for(target);
-    if (target_chunk >= 0) {
+    const s32 target_function = function_index_for(target);
+    if (target_function >= 0) {
         fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] &&\n",
-                target_chunk);
+                target_function);
         fprintf(out, "                dolrecomp_call_enter()) {\n");
-        fprintf(out, "                void func_%08X(CPUState* ctx);\n", g_chunk_starts[target_chunk]);
-        fprintf(out, "                func_%08X(ctx);\n", g_chunk_starts[target_chunk]);
+        fprintf(out, "                void func_%08X(CPUState* ctx);\n", g_function_starts[target_function]);
+        fprintf(out, "                func_%08X(ctx);\n", g_function_starts[target_function]);
         fprintf(out, "                dolrecomp_call_leave();\n");
         fprintf(out, "            }\n");
     } else {
@@ -441,17 +440,17 @@ static void emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
 //
 // The prototype is declared at block scope so this needs no header plumbing;
 // the definition lives in another translation unit and the linker resolves it.
-static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
-                                  u32 func_start, u32 func_end) {
+static bool emit_direct_call(FILE* out, const PPCInst* inst,
+                             u32 func_start, u32 func_end) {
     u32 continuation = inst->address + 4u;
-    s32 target_chunk = chunk_index_for(inst->branch_target);
+    s32 target_function = function_index_for(inst->branch_target);
     // Without a local continuation label there is nothing to resume into, so
     // the call would buy nothing over the plain return.
     if (!branch_target_is_local(func_start, func_end, continuation))
         return false;
-    if (target_chunk < 0) {
-        // A chunk of a later section is not in the table yet: look it up at
-        // run time instead.
+    if (target_function < 0) {
+        // Not module code the recompiler saw (low-memory stubs, code loaded
+        // at run time): look it up at run time instead.
         char target[16];
         snprintf(target, sizeof(target), "0x%08Xu", inst->branch_target);
         fprintf(out, "            ctx->pc = %s;\n", target);
@@ -460,10 +459,10 @@ static bool emit_cross_chunk_call(FILE* out, const PPCInst* inst,
         return true;
     }
 
-    u32 target_start = g_chunk_starts[target_chunk];
+    u32 target_start = g_function_starts[target_function];
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
     fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] &&\n",
-            target_chunk);
+            target_function);
     fprintf(out, "                dolrecomp_call_enter()) {\n");
     fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_start);
     fprintf(out, "                func_%08X(ctx);\n", target_start);
@@ -522,7 +521,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
             }
             fprintf(out, "            goto %s_%08X;\n", native ? "native_declined" : "label",
                     inst->branch_target);
-        } else if (!emit_cross_chunk_call(out, inst, func_start, func_end)) {
+        } else if (!emit_direct_call(out, inst, func_start, func_end)) {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "            return;\n");
         }
@@ -543,7 +542,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     } else if (local_target) {
         fprintf(out, "            goto label_%08X;\n", inst->branch_target);
     } else {
-        emit_cross_chunk_tail(out, inst);
+        emit_tail_call(out, inst);
     }
 }
 
@@ -665,7 +664,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#define DOLRECOMP_C_MAX_CALL_DEPTH 256\n"
         "#endif\n"
         "extern unsigned dolrecomp_call_depth;\n"
-        "/* Published by the runtime; see emit_cross_chunk_call in DolRecomp. */\n"
+        "/* Published by the runtime; see emit_direct_call in DolRecomp. */\n"
         "extern const unsigned char* dolrecomp_direct_ok;\n"
         "extern u32 dolrecomp_idle_pc;\n"
         "typedef void (*DolRecompFunction)(CPUState* ctx);\n"
@@ -700,7 +699,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "\n"
         // Preserve the PPC bit-level single conversion, including denormals.
         // Every lfs goes through this, so the common path is forced inline
-        // (a 16 KiB chunk function exhausts the inliner's budget otherwise)
+        // (a large function exhausts the inliner's budget otherwise)
         // and only the denormal normalisation loop stays a call.
         "#if defined(_MSC_VER)\n"
         "#define DOLRECOMP_ALWAYS_INLINE static __forceinline\n"
@@ -2232,8 +2231,8 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
                 func_addr);
         return false;
     }
-    // DOLRECOMP_C_LOCAL_RETURNS=0 sends every blr back through the dispatcher
-    // instead of routing it inside the function.
+    // A blr can return inside the function only after a call to a local
+    // target; then it goes through a switch over those return points.
     bool has_local_returns = false;
     for (u32 i = 0; i < count; ++i)
         has_local_returns |= cfg.return_targets[i] != 0;
@@ -2299,11 +2298,11 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
             has_local_returns, true);
     }
 
-    // Running off the end continues in the next chunk, as a tail call would.
+    // Running off the end continues in the next function, as a tail call would.
     {
-        const s32 next = chunk_index_for(func_end);
+        const s32 next = function_index_for(func_end);
         fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
-        if (next >= 0 && g_chunk_starts[next] == func_end) {
+        if (next >= 0 && g_function_starts[next] == func_end) {
             fprintf(out, "    if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] && dolrecomp_call_enter()) {\n",
                     next);
             fprintf(out, "        void func_%08X(CPUState* ctx);\n", func_end);
