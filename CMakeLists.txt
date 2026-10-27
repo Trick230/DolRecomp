@@ -41,6 +41,7 @@ endif()
 
 add_library(dr_analysis STATIC
     src/analysis/embedded_data.c
+    src/analysis/functions.c
     src/analysis/symbol_map.c)
 target_include_directories(dr_analysis PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_analysis PUBLIC dr_frontend)

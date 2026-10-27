@@ -163,24 +163,25 @@ static int add_export(Export** exports, u32* count, u32* capacity, const char* n
     return 1;
 }
 
-static int add_text(RsoLink* link, const char* module, u32 address, const u8* bytes, u32 size) {
-    for (u32 i = 0; i < link->count; i++) {
-        if (link->text[i].address == address)
+static int add_section(RsoSection** sections, u32* count, const char* module, u32 address,
+                       const u8* bytes, u32 size) {
+    for (u32 i = 0; i < *count; i++) {
+        if ((*sections)[i].address == address)
             return 1;
     }
-    RsoText* resized = (RsoText*)realloc(link->text, (link->count + 1u) * sizeof(RsoText));
+    RsoSection* resized = (RsoSection*)realloc(*sections, (*count + 1u) * sizeof(RsoSection));
     if (!resized)
         return 0;
-    link->text = resized;
-    RsoText* text = &link->text[link->count];
-    text->bytes = (u8*)malloc(size);
-    if (!text->bytes)
+    *sections = resized;
+    RsoSection* section = &resized[*count];
+    section->bytes = (u8*)malloc(size);
+    if (!section->bytes)
         return 0;
-    memcpy(text->bytes, bytes, size);
-    text->module = module;
-    text->address = address;
-    text->size = size;
-    link->count++;
+    memcpy(section->bytes, bytes, size);
+    section->module = module;
+    section->address = address;
+    section->size = size;
+    ++*count;
     return 1;
 }
 
@@ -265,6 +266,12 @@ int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir) {
             exports[unique++] = exports[i];
     }
     export_count = unique;
+    link->exports = (u32*)malloc((export_count ? export_count : 1u) * sizeof(u32));
+    if (!link->exports)
+        goto done;
+    for (u32 i = 0; i < export_count; i++)
+        link->exports[i] = exports[i].address;
+    link->export_count = export_count;
 
     for (u32 m = 0; m < module_count; m++) {
         const RecompRsoModule* placed = &config->modules[m];
@@ -318,16 +325,15 @@ int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir) {
 
         // Executable sections are the ones holding the prolog/epilog/unresolved
         // entry points; RSO section tables carry no executable flag of their own.
-        const u8 code_sections[3] = {h->prolog_section, h->epilog_section, h->unresolved_section};
-        for (u32 c = 0; c < 3u; c++) {
-            const u32 index = code_sections[c];
-            if (index >= h->section_count)
-                continue;
+        for (u32 index = 0; index < h->section_count; index++) {
             const u8* table = file->data + h->section_table + index * 8u;
             const u32 offset = read_be32(table) & ~1u, size = read_be32(table + 4);
             if (offset == 0 || size == 0 || !fits(file, offset, size))
                 continue;
-            if (!add_text(link, placed->file, placed->base + offset, image + offset, size))
+            const bool code = index == h->prolog_section || index == h->epilog_section ||
+                              index == h->unresolved_section;
+            if (!add_section(code ? &link->text : &link->data, code ? &link->count : &link->data_count,
+                             placed->file, placed->base + offset, image + offset, size))
                 goto done;
         }
         printf("linked %s at 0x%08X (%u unresolved imports)\n", placed->file, placed->base, missing);
@@ -353,6 +359,10 @@ done:
 void rso_link_free(RsoLink* link) {
     for (u32 i = 0; i < link->count; i++)
         free(link->text[i].bytes);
+    for (u32 i = 0; i < link->data_count; i++)
+        free(link->data[i].bytes);
     free(link->text);
+    free(link->data);
+    free(link->exports);
     memset(link, 0, sizeof(*link));
 }

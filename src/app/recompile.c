@@ -2,6 +2,7 @@
 
 #include "analysis/code_section.h"
 #include "analysis/embedded_data.h"
+#include "analysis/functions.h"
 #include "app/natives.h"
 #include "app/rso_link.h"
 #include "backend/codegen.h"
@@ -288,6 +289,60 @@ done:
     return ok;
 }
 
+static int report_functions(const DOLFile* dol, const RsoLink* rso, const DolRecompNativeList* natives,
+                            const LoadedCodeSection* sections, u32 section_count, const char* out_dir) {
+    PPCInst* insts[DOL_NUM_TEXT + 64] = {0};
+    GuestRegion data[DOL_NUM_DATA + 256];
+    u32 data_count = 0;
+    u32* seeds = (u32*)malloc((1u + rso->export_count + natives->count) * sizeof(u32));
+    u32 seed_count = 0;
+    int ok = seeds != NULL;
+    for (u32 s = 0; ok && s < section_count; s++) {
+        const u32 count = sections[s].size / 4u;
+        ok = (insts[s] = (PPCInst*)malloc((count ? count : 1u) * sizeof(PPCInst))) != NULL;
+        for (u32 i = 0; ok && i < count; i++)
+            insts[s][i] = ppc_decode(read_be32(sections[s].data + i * 4u), sections[s].address + i * 4u);
+    }
+    for (int i = 0; i < DOL_NUM_DATA; i++) {
+        if (dol->header.data_sizes[i])
+            data[data_count++] = (GuestRegion){dol->header.data_addresses[i], dol->header.data_sizes[i],
+                                               dol_get_data_section(dol, i)};
+    }
+    for (u32 i = 0; i < rso->data_count && data_count < sizeof(data) / sizeof(data[0]); i++)
+        data[data_count++] = (GuestRegion){rso->data[i].address, rso->data[i].size, rso->data[i].bytes};
+    if (ok) {
+        seeds[seed_count++] = dol->header.entry_point;
+        for (u32 i = 0; i < rso->export_count; i++)
+            seeds[seed_count++] = rso->exports[i];
+        for (u32 i = 0; i < natives->count; i++)
+            seeds[seed_count++] = natives->entries[i].address;
+    }
+    FunctionAnalysisInput input = {sections, (const PPCInst* const*)insts, section_count,
+                                   data, data_count, seeds, seed_count};
+    FunctionAnalysis analysis;
+    ok = ok && analyze_functions(&analysis, &input);
+    if (ok) {
+        u32 entries = 0;
+        for (u32 i = 0; i < analysis.table_count; i++)
+            entries += analysis.tables[i].count;
+        printf("functions: %u, jump tables: %u (%u cases)\n", analysis.function_count,
+               analysis.table_count, entries);
+        char path[1200];
+        FILE* out = make_dir_tree(out_dir) && join_path(path, sizeof(path), out_dir, "functions.txt")
+                        ? fopen(path, "w") : NULL;
+        for (u32 i = 0; out && i < analysis.function_count; i++)
+            fprintf(out, "%08X %08X\n", analysis.functions[i].start,
+                    analysis.functions[i].end - analysis.functions[i].start);
+        if (out)
+            fclose(out);
+        function_analysis_free(&analysis);
+    }
+    for (u32 s = 0; s < section_count; s++)
+        free(insts[s]);
+    free(seeds);
+    return ok;
+}
+
 int recompile(const RecompConfig* config, const char* game_dir, const char* out_dir) {
     char dol_path[1200];
     DOLFile dol;
@@ -339,6 +394,8 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     if (!entries)
         goto done;
     printf("entry targets: %u\n", entry_count);
+    if (!report_functions(&dol, &rso, &natives, sections, section_count, out_dir))
+        goto done;
     emit_set_entry_targets(entries, entry_count);
 
     ok = emit_sections(sections, section_count, out_dir, dol.header.entry_point, config->shards);

@@ -13,12 +13,16 @@ typedef struct {
     const char* module;  // the config's file name
     u32 address;
     u32 size;
-    u8* bytes;  // relocated text, owned
-} RsoText;
+    u8* bytes;  // relocated, owned
+} RsoSection;
 
 typedef struct {
-    RsoText* text;
+    RsoSection* text;
     u32 count;
+    RsoSection* data;  // the other loaded sections, where code pointers live
+    u32 data_count;
+    u32* exports;      // every exported address, the static module's too
+    u32 export_count;
 } RsoLink;
 
 int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir);
