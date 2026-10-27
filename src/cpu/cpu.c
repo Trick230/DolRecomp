@@ -340,6 +340,10 @@ unsigned dolrecomp_call_depth = 0;
    idle-loop pc, both owned by the host. NULL keeps every call on the host. */
 const unsigned char* dolrecomp_direct_ok = NULL;
 u32 dolrecomp_idle_pc = 0;
+/* The same flags per 2^DOLRECOMP_DIRECT_LINE_SHIFT-byte line of MEM1, for calls
+   whose target is known only at run time; a size of 0 keeps them on the host. */
+const unsigned char* dolrecomp_direct_lines = NULL;
+u32 dolrecomp_direct_lines_size = 0;
 
 bool ppc_fp_available(CPUState* cpu, u32 cia) {
     if (cpu->msr & PPC_MSR_FP)

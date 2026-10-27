@@ -10,6 +10,13 @@ void func_80004060(CPUState* ctx);
 void func_80004068(CPUState* ctx);
 void func_80004070(CPUState* ctx);
 
+/* Host hook for call targets known only at run time. Never reached: this test
+   publishes no direct-line table, so such calls return to the loop below. */
+void dolrecomp_indirect_dispatch(CPUState* ctx, u32 address) {
+    (void)ctx;
+    (void)address;
+}
+
 static u64 bits_of(f64 value) {
     u64 bits;
     memcpy(&bits, &value, sizeof(bits));

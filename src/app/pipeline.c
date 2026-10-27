@@ -1409,18 +1409,20 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
         for (u32 i = 1; i < funcs.count; ++i)
             chunks_ascending &= funcs.ranges[i - 1u].start < funcs.ranges[i].start;
         if (chunks_ascending && funcs.count)
-            chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
+            chunk_starts = (u32*)malloc((size_t)funcs.count * 2u * sizeof(u32));
         if (chunk_starts) {
-            for (u32 i = 0; i < funcs.count; ++i)
+            for (u32 i = 0; i < funcs.count; ++i) {
                 chunk_starts[i] = funcs.ranges[i].start;
-            emit_set_chunk_table(chunk_starts, funcs.count);
+                chunk_starts[funcs.count + i] = funcs.ranges[i].end;
+            }
+            emit_set_chunk_table(chunk_starts, chunk_starts + funcs.count, funcs.count);
         }
 
         u32 active_jobs = effective_chunk_jobs(section_job_count, jobs);
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
         bool chunks_written = run_chunk_jobs(chunk_jobs, section_job_count, jobs);
-        emit_set_chunk_table(NULL, 0);
+        emit_set_chunk_table(NULL, NULL, 0);
         free(chunk_starts);
         if (!chunks_written) {
             smc_analysis_free(&smc);
