@@ -1,5 +1,4 @@
 #include "app/setup.h"
-#include "app/database.h"
 #include "platform/fs.h"
 #include "platform/process.h"
 #include <stdio.h>
@@ -27,29 +26,6 @@
 #define WIT_ARCHIVE_NAME "wit-v3.05a-r8638-x86_64.tar.gz"
 #define WIT_EXE_NAME "wit"
 #endif
-
-int write_setup_flag(const char* path) {
-#ifdef _WIN32
-    SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
-#endif
-
-    FILE* file = fopen(path, "w");
-    if (!file) {
-        fprintf(stderr, "error: can't write setup flag '%s'\n", path);
-        return 0;
-    }
-
-    fprintf(file, "done\n");
-    if (fclose(file) != 0) {
-        fprintf(stderr, "error: can't finish setup flag '%s'\n", path);
-        return 0;
-    }
-
-#ifdef _WIN32
-    SetFileAttributesA(path, FILE_ATTRIBUTE_HIDDEN);
-#endif
-    return 1;
-}
 
 int local_wit_path(char* out, size_t out_size) {
     char path[1024];
@@ -225,46 +201,10 @@ int install_wit_tools(void) {
     return 1;
 }
 
-int setup_wit_tools(void) {
+int run_setup(void) {
     if (wit_tools_available()) {
         printf("wit tools found.\n");
         return 1;
     }
-
-    if (!prompt_yes_no("wit tools missing, download? [Y/N] ")) {
-        printf("skipping wit tools.\n");
-        return 1;
-    }
-
     return install_wit_tools();
 }
-
-int run_setup(void) {
-    char titles_path[1024];
-    char flag_path[1024];
-
-    if (!make_dir_tree(DATABASE_DIR))
-        return 0;
-    if (!database_titles_path(titles_path, sizeof(titles_path)) ||
-        !database_path(flag_path, sizeof(flag_path), DATABASE_SETUP_FLAG)) {
-        fprintf(stderr, "error: database path is too long\n");
-        return 0;
-    }
-
-    printf("setting up database...\n");
-    printf("downloading GameTDB titles.txt...\n");
-    if (!download_titles_database(titles_path))
-        return 0;
-
-    if (!write_setup_flag(flag_path))
-        return 0;
-
-    if (!setup_wit_tools())
-        return 0;
-
-    printf("done!\n");
-    printf("  titles: %s\n", titles_path);
-    printf("  flag:   %s\n", flag_path);
-    return 1;
-}
-

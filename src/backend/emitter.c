@@ -644,7 +644,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#include <string.h>\n"
         "#include <math.h>\n"
         "#ifndef DOLRECOMP_CPU_HEADER\n"
-        "#define DOLRECOMP_CPU_HEADER \"cpu/cpu.h\"\n"
+        "#define DOLRECOMP_CPU_HEADER \"core/cpu.h\"\n"
         "#endif\n"
         "#include DOLRECOMP_CPU_HEADER\n"
         "\n"
