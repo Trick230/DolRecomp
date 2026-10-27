@@ -27,9 +27,13 @@ void emit_set_chunk_table(const u32* starts, u32 count);
 // the module links in. It returns true after doing the whole call (registers,
 // memory, cycles) and false, with no side effects, when the guest code has to
 // run instead. Same lifetime rules as the chunk table; sorted by address.
+// A `jump` native ends somewhere other than its return address (a context
+// load ending in rfi): it sets ctx->pc itself and its callers go back to the
+// dispatcher instead of resuming after the call.
 typedef struct {
     u32 address;
     const char* name;
+    bool jump;
 } DolRecompNative;
 void emit_set_natives(const DolRecompNative* natives, u32 count);
 

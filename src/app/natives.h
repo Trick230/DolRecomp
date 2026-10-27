@@ -5,8 +5,9 @@
 #include "backend/emitter.h"
 
 // --natives file: one guest function per line,
-//   <address> <size> <fnv1a64 of its code bytes> <host symbol>
-// all numbers hex, '#' starts a comment. A host implementation hard-codes the
+//   <address> <size> <fnv1a64 of its code bytes> <host symbol> [jump]
+// all numbers hex, '#' starts a comment; `jump` marks a native that sets the
+// pc itself (see DolRecompNative). A host implementation hard-codes the
 // structure layout of the exact SDK build it was written against, so every
 // entry is pinned to the guest bytes it replaces and a mismatch is an error.
 typedef struct {

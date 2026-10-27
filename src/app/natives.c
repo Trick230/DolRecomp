@@ -44,12 +44,15 @@ int natives_load(DolRecompNativeList* list, const char* path) {
         unsigned address = 0, size = 0;
         unsigned long long hash = 0;
         char name[256];
-        int fields = sscanf(line, "%x %x %llx %255s", &address, &size, &hash, name);
+        char flag[16];
+        int fields =
+            sscanf(line, "%x %x %llx %255s %15s", &address, &size, &hash, name, flag);
         if (fields <= 0)
             continue;
-        if (fields != 4 || size == 0 || (address & 3u) != 0 || (size & 3u) != 0 ||
-            !valid_symbol(name)) {
-            fprintf(stderr, "error: %s:%u: expected '<address> <size> <hash> <symbol>'\n",
+        if (fields < 4 || size == 0 || (address & 3u) != 0 || (size & 3u) != 0 ||
+            !valid_symbol(name) || (fields == 5 && strcmp(flag, "jump") != 0)) {
+            fprintf(stderr,
+                    "error: %s:%u: expected '<address> <size> <hash> <symbol> [jump]'\n",
                     path, line_number);
             ok = 0;
             break;
@@ -86,6 +89,7 @@ int natives_load(DolRecompNativeList* list, const char* path) {
         strcpy(owned, name);
         list->entries[list->count].address = address;
         list->entries[list->count].name = owned;
+        list->entries[list->count].jump = fields == 5;
         list->sizes[list->count] = size;
         list->hashes[list->count] = hash;
         ++list->count;

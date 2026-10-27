@@ -60,6 +60,13 @@ int main(void) {
     CHECK(natives_verify(&list, &section, 1));
     natives_free(&list);
 
+    CHECK(write_text(path, "80001000 4 0 a jump\n80001004 4 0 b\n"));
+    CHECK(natives_load(&list, path));
+    CHECK(list.entries[0].jump && !list.entries[1].jump);
+    natives_free(&list);
+    CHECK(write_text(path, "80001000 4 0 a leap\n"));
+    CHECK(!natives_load(&list, path));  // unknown flag
+
     CHECK(write_text(path, "80001004 4 0 b\n80001000 4 0 a\n"));
     CHECK(!natives_load(&list, path));  // unsorted
     CHECK(write_text(path, "80001000 4 0 not-a-symbol\n"));
@@ -71,7 +78,7 @@ int main(void) {
 
     // A bl to a native resumes after the call when the native accepts, and a
     // native function entry checks it before running its guest body.
-    static const DolRecompNative natives[] = {{0x80001008u, "host_leaf"}};
+    static const DolRecompNative natives[] = {{0x80001008u, "host_leaf", false}};
     PPCInst insts[3];
     const u32 words[3] = {0x48000009u /* bl +8 */, 0x60000000u, 0x4E800020u};
     for (u32 i = 0; i < 3; ++i)
@@ -85,9 +92,27 @@ int main(void) {
     fclose(out);
     char* text = read_text(out_path);
     CHECK(text);
-    CHECK(strstr(text, "if (host_leaf(ctx))\n                    goto label_80001004;"));
+    CHECK(strstr(text, "if (host_leaf(ctx)) {\n"
+                       "                    if (dolrecomp_idle_pc != 0x80001004u)\n"
+                       "                        goto label_80001004;\n"
+                       "                    ctx->pc = 0x80001004u;\n"
+                       "                    return;"));
     CHECK(strstr(text, "goto native_declined_80001008;"));
     CHECK(strstr(text, "label_80001008:\n    {\n        bool host_leaf(CPUState* ctx);"));
+    free(text);
+
+    // A jump native's callers leave to the dispatcher at the pc it set.
+    static const DolRecompNative jumps[] = {{0x80001008u, "host_jump", true}};
+    out = fopen(out_path, "wb");
+    CHECK(out);
+    emit_set_natives(jumps, 1);
+    CHECK(emit_function(out, insts, 3, 0x80001000u));
+    emit_set_natives(NULL, 0);
+    fclose(out);
+    text = read_text(out_path);
+    CHECK(text);
+    CHECK(strstr(text, "if (host_jump(ctx))\n                    return;"));
+    CHECK(strstr(text, "if (host_jump(ctx)) {\n            return;"));
     free(text);
     remove(out_path);
     remove(path);
