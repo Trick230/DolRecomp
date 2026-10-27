@@ -212,6 +212,7 @@ add_library(dr_app STATIC
     src/app/setup.c
     src/app/paths.c
     src/app/pipeline.c
+    src/app/natives.c
 )
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 # The generated-object cache must invalidate when the code that generates those
@@ -270,6 +271,13 @@ add_test(NAME source_policy
     COMMAND ${CMAKE_COMMAND}
         -DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/check_source_policy.cmake)
+
+add_executable(test_natives tests/test_natives.c)
+target_link_libraries(test_natives PRIVATE dr_app)
+if(DOLRECOMP_ENABLE_LLVM)
+    set_property(TARGET test_natives PROPERTY LINKER_LANGUAGE CXX)
+endif()
+add_test(NAME natives COMMAND test_natives)
 
 add_executable(test_opcodes tests/test_opcodes.c)
 target_link_libraries(test_opcodes PRIVATE dr_frontend)

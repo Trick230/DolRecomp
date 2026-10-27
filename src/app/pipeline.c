@@ -1,5 +1,6 @@
 #include "app/pipeline.h"
 #include "app/paths.h"
+#include "app/natives.h"
 #include "platform/fs.h"
 #include "platform/pathlist.h"
 #include "platform/strutil.h"
@@ -1508,9 +1509,27 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
         section->embedded_data_mode = EMBEDDED_DATA_DOL;
     }
 
-    return emit_code_sections_split(sections, section_count, output_path, cpu,
-                                    dol->header.entry_point, jobs,
-                                    local_chunks_dir, symbols, options);
+    DolRecompNativeList natives = {0};
+    if (options->natives_path) {
+        if (options->backend != DOLRECOMP_BACKEND_C) {
+            fprintf(stderr, "error: --natives needs the C backend\n");
+            return 0;
+        }
+        if (!natives_load(&natives, options->natives_path))
+            return 0;
+        if (!natives_verify(&natives, sections, section_count)) {
+            natives_free(&natives);
+            return 0;
+        }
+        printf("natives: %u guest functions with host implementations\n", natives.count);
+        emit_set_natives(natives.entries, natives.count);
+    }
+    int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
+                                      dol->header.entry_point, jobs,
+                                      local_chunks_dir, symbols, options);
+    emit_set_natives(NULL, 0);
+    natives_free(&natives);
+    return ok;
 }
 
 int emit_rpx_split(const RPXFile* rpx, const char* output_path,

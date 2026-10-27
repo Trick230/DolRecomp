@@ -15,6 +15,7 @@ typedef struct {
     const char* title_id_arg;
     const char* output_arg;
     const char* map_path;
+    const char* natives_path;
     const char* llvm_targets;
     const char* profile_generate_path;
     const char* profile_use_path;

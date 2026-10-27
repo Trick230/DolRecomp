@@ -23,6 +23,16 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 // passing count == 0 restores the safe return-to-chassis form.
 void emit_set_chunk_table(const u32* starts, u32 count);
 
+// A guest function with a host implementation, `bool name(CPUState*)`, that
+// the module links in. It returns true after doing the whole call (registers,
+// memory, cycles) and false, with no side effects, when the guest code has to
+// run instead. Same lifetime rules as the chunk table; sorted by address.
+typedef struct {
+    u32 address;
+    const char* name;
+} DolRecompNative;
+void emit_set_natives(const DolRecompNative* natives, u32 count);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 

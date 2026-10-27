@@ -323,6 +323,26 @@ void emit_set_chunk_table(const u32* starts, u32 count) {
     g_chunk_count = count ? count : 0;
 }
 
+static const DolRecompNative* g_natives = NULL;
+static u32 g_native_count = 0;
+
+void emit_set_natives(const DolRecompNative* natives, u32 count) {
+    g_natives = count ? natives : NULL;
+    g_native_count = count ? count : 0;
+}
+
+static const char* native_for(u32 addr) {
+    u32 lo = 0, hi = g_native_count;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (g_natives[mid].address < addr)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo < g_native_count && g_natives[lo].address == addr ? g_natives[lo].name : NULL;
+}
+
 // The index of the chunk whose func_<start>() covers `addr`, or -1 if none
 // does. Chunks tile the text sections but the first one does not start on the
 // common stride, so this binary-searches rather than dividing.
@@ -392,6 +412,19 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
 
     if (inst->lk) {
         fprintf(out, "            ctx->lr = 0x%08Xu;\n", inst->address + 4);
+        // A native callee resumes straight after the call, skipping both the
+        // guest body and the return dispatch; if it declines, a local callee
+        // is entered past its own (already tried) native check.
+        const char* native = native_for(inst->branch_target);
+        if (native && branch_target_is_local(func_start, func_end, inst->address + 4u)) {
+            fprintf(out, "            {\n");
+            fprintf(out, "                bool %s(CPUState* ctx);\n", native);
+            fprintf(out, "                if (%s(ctx))\n", native);
+            fprintf(out, "                    goto label_%08X;\n", inst->address + 4u);
+            fprintf(out, "            }\n");
+        } else {
+            native = NULL;
+        }
         if (local_target) {
             if (local_backward) {
                 fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
@@ -399,7 +432,8 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
                 fprintf(out, "                return;\n");
                 fprintf(out, "            }\n");
             }
-            fprintf(out, "            goto label_%08X;\n", inst->branch_target);
+            fprintf(out, "            goto %s_%08X;\n", native ? "native_declined" : "label",
+                    inst->branch_target);
         } else if (!emit_cross_chunk_call(out, inst, func_start, func_end)) {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "            return;\n");
@@ -2007,6 +2041,20 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
 
     for (u32 i = 0; i < count; i++) {
         fprintf(out, "label_%08X:\n", insts[i].address);
+        // Entry check for callers that did not try the native themselves:
+        // tail calls, indirect calls and chassis dispatch.
+        const char* native = native_for(insts[i].address);
+        if (native) {
+            fprintf(out, "    {\n");
+            fprintf(out, "        bool %s(CPUState* ctx);\n", native);
+            fprintf(out, "        if (%s(ctx)) {\n", native);
+            fprintf(out, "            ctx->pc = ctx->lr & ~3u;\n");
+            fprintf(out, has_local_returns ? "            goto return_dispatch_%08X;\n"
+                                           : "            return;\n", func_addr);
+            fprintf(out, "        }\n");
+            fprintf(out, "    }\n");
+            fprintf(out, "native_declined_%08X: __attribute__((unused));\n", insts[i].address);
+        }
         if (cfg.loop_ends[i] != UINT32_MAX) {
             u32 continuation = insts[cfg.loop_ends[i]].address + 4u;
             fprintf(out, "    loop_%08X(ctx);\n", insts[i].address);

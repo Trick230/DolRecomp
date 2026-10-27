@@ -27,6 +27,7 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --gamecube                     GameCube mode (no title ID required)\n");
     fprintf(stderr, "  --rel-base <addr>              Override first virtual load address for REL codegen\n");
     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
+    fprintf(stderr, "  --natives <path>               Host implementations for listed guest functions (C backend)\n");
     fprintf(stderr, "  --setup                        Download titles database and optionally install wit\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Examples:\n");
@@ -440,6 +441,16 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 return 0;
             }
             opts->map_path = arg + 6;
+            continue;
+        }
+
+        if (strcmp(arg, "--natives") == 0 || strncmp(arg, "--natives=", 10) == 0) {
+            const char* path = arg[9] == '=' ? arg + 10 : (i + 1 < argc ? argv[++i] : "");
+            if (path[0] == '\0') {
+                fprintf(stderr, "error: --natives needs a path\n");
+                return 0;
+            }
+            opts->natives_path = path;
             continue;
         }
 
