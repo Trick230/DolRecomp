@@ -80,6 +80,16 @@ static u32 gpr_writes(u32 raw) {
             return d;                                    // indexed loads, mf*
         case 55: case 119: case 311: case 375:
             return d | a;                                // indexed loads with update
+        case 28: case 60: case 124: case 284: case 316: case 412: case 444: case 476:
+        case 24: case 536: case 792: case 824: case 26: case 922: case 954:
+            return a;                                    // logical, shifts, cntlzw, exts*
+        default:
+            break;
+        }
+        switch ((raw >> 1) & 0x1FFu) {                   // XO form, either OE
+        case 8: case 10: case 11: case 40: case 75: case 104: case 136: case 138:
+        case 200: case 202: case 232: case 234: case 235: case 266: case 459: case 491:
+            return d;                                    // add/sub/neg/mul/div
         default:
             return d | a;
         }
@@ -128,22 +138,37 @@ static bool resolve_constant(const PPCInst* insts, u32 index, u32 reg, u32* valu
 
 // --- Jump tables --------------------------------------------------------------
 
-// The case count of `index_reg` bounded by `cmplwi crN, index_reg, N; bgt`
-// before instruction `before`.
-static u32 jump_table_bound(const PPCInst* insts, u32 before, u32 index_reg) {
-    for (u32 back = 1; back <= 16 && back <= before; back++) {
-        const PPCInst* in = &insts[before - back];
-        if (in->op == PPC_OP_CMPLI && in->rA == index_reg && in->l == 0) {
-            // The guard: a bgt on that field somewhere after the compare.
-            for (u32 i = before - back + 1; i < before; i++) {
-                const PPCInst* b = &insts[i];
-                if ((b->op == PPC_OP_BC || b->op == PPC_OP_BCLR) && !b->lk &&
-                    (b->bo == 12 || b->bo == 4) && b->bi == in->crfD * 4u + 1u)
-                    return (u32)in->uimm + 1u;
-            }
-            return 0;
-        }
-        if (gpr_writes(in->raw) & (1u << index_reg))
+static bool is_bound_compare(const PPCInst* in, u32 index_reg) {
+    return in->op == PPC_OP_CMPLI && in->rA == index_reg && in->l == 0;
+}
+
+// The case count of compare `cmp` if a bgt (or bgtlr) on its field follows it
+// before instruction `end`.
+static u32 guarded_count(const PPCInst* insts, u32 cmp, u32 end) {
+    const u32 bi = insts[cmp].crfD * 4u + 1u;
+    for (u32 i = cmp + 1; i < end; i++) {
+        const PPCInst* b = &insts[i];
+        if ((b->op == PPC_OP_BC || b->op == PPC_OP_BCLR) && !b->lk && (b->bo == 12 || b->bo == 4) &&
+            b->bi == bi)
+            return (u32)insts[cmp].uimm + 1u;
+    }
+    return 0;
+}
+
+// The case count of `index_reg`, scaled at `scale` and loaded at `load`,
+// bounded by `cmplwi crN, index_reg, N; bgt`. The compare usually comes
+// before the scaling, but MWCC may also schedule it between the two.
+static u32 jump_table_bound(const PPCInst* insts, u32 scale, u32 load, u32 index_reg) {
+    for (u32 i = scale + 1; i < load; i++) {
+        if (is_bound_compare(&insts[i], index_reg))
+            return guarded_count(insts, i, load);
+        if (gpr_writes(insts[i].raw) & (1u << index_reg))
+            break;
+    }
+    for (u32 back = 1; back <= 16 && back <= scale; back++) {
+        if (is_bound_compare(&insts[scale - back], index_reg))
+            return guarded_count(insts, scale - back, load);
+        if (gpr_writes(insts[scale - back].raw) & (1u << index_reg))
             return 0;
     }
     return 0;
@@ -185,12 +210,12 @@ static bool find_jump_table(const FunctionAnalysisInput* in, u32 section, u32 bc
         return false;
 
     u32 count = 0;
-    for (u32 back = 1; back <= 8 && back <= lwzx; back++) {
+    for (u32 back = 1; back <= 24 && back <= lwzx; back++) {
         const PPCInst* i = &insts[lwzx - back];
         if (!(gpr_writes(i->raw) & (1u << scaled)))
             continue;
         if (i->op == PPC_OP_RLWINM && i->sh == 2 && i->mb == 0 && i->me == 29)
-            count = jump_table_bound(insts, lwzx - back, i->rS);
+            count = jump_table_bound(insts, lwzx - back, lwzx, i->rS);
         break;
     }
     if (count == 0 || count > 4096)
@@ -299,8 +324,18 @@ static u32 next_start(const Analysis* a, u32 s, u32 i, u32 count) {
     return i;
 }
 
-// Makes every branch that leaves its function land on a start, until nothing
-// changes.
+// Whether `address` holds `stwu r1, -N(r1)`. No branch inside a function
+// goes back to its prologue, so a branch to one is a tail call.
+static bool is_prologue(const FunctionAnalysisInput* in, u32 address) {
+    const s32 s = section_of(in, address);
+    if (s < 0)
+        return false;
+    const PPCInst* inst = &in->insts[s][(address - in->sections[s].address) / 4u];
+    return inst->op == PPC_OP_STWU && inst->rS == 1 && inst->rA == 1 && inst->simm < 0;
+}
+
+// Makes every branch that leaves its function, or enters a prologue, land on
+// a start, until nothing changes.
 static void close_starts(Analysis* a, const FunctionAnalysis* out) {
     const FunctionAnalysisInput* in = a->in;
     for (bool changed = true; changed;) {
@@ -314,7 +349,8 @@ static void close_starts(Analysis* a, const FunctionAnalysis* out) {
                 for (u32 i = first; i < end; i++) {
                     const PPCInst* inst = &insts[i];
                     if ((inst->op == PPC_OP_B || inst->op == PPC_OP_BC) && !inst->lk &&
-                        (inst->branch_target < lo || inst->branch_target >= hi))
+                        (inst->branch_target < lo || inst->branch_target >= hi ||
+                         (inst->branch_target != lo && is_prologue(in, inst->branch_target))))
                         changed |= mark_start(a, inst->branch_target);
                     if (inst->op == PPC_OP_BCCTR && !inst->lk) {
                         const JumpTable* t = function_analysis_table(out, base + i * 4u);
