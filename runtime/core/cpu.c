@@ -250,9 +250,9 @@ void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia) {
 
 u32 ppc_mftb(CPUState* cpu, u16 tbr, u32 cia) {
     if (tbr == 268)
-        return (u32)cpu->timebase;
+        return (u32)ppc_timebase(cpu);
     if (tbr == 269)
-        return (u32)(cpu->timebase >> 32);
+        return (u32)(ppc_timebase(cpu) >> 32);
 
     ppc_program_exception(cpu, PPC_PROGRAM_ILLEGAL, cia);
     return 0;

@@ -15,8 +15,8 @@ u32 ppc_mfspr(CPUState* cpu, u16 spr, u32 cia) {
     case 19: return cpu->dar;
     case 26: return cpu->srr0;
     case 27: return cpu->srr1;
-    case 268: return (u32)cpu->timebase;
-    case 269: return (u32)(cpu->timebase >> 32);
+    case 268: return (u32)ppc_timebase(cpu);
+    case 269: return (u32)(ppc_timebase(cpu) >> 32);
     case 282: return cpu->ear;
     case 287: return cpu->spr_read ? cpu->spr_read(cpu, spr, cia) : 0x00083214u;
     case 912:

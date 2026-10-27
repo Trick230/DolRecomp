@@ -514,7 +514,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         }
         if (local_target) {
             if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
+                fprintf(out, "            if (ctx->downcount <= 0) {\n");
                 fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
                 fprintf(out, "                return;\n");
                 fprintf(out, "            }\n");
@@ -529,7 +529,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     }
     if (local_backward) {
         if (direct_backedge) {
-            fprintf(out, "            if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) {\n");
+            fprintf(out, "            if (ctx->downcount <= 0) {\n");
             fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "                return;\n");
             fprintf(out, "            }\n");
@@ -572,7 +572,7 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
         if (entry_dispatch) {
             fprintf(out, "            if (target - 0x%08Xu < 0x%08Xu) {\n", function_address,
                     function_end - function_address);
-            fprintf(out, "                if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET)\n");
+            fprintf(out, "                if (ctx->downcount <= 0)\n");
             fprintf(out, "                    return;\n");
             fprintf(out, "                goto entry_dispatch_%08X;\n", function_address);
             fprintf(out, "            }\n");
@@ -646,9 +646,8 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#endif\n"
         "#include DOLRECOMP_CPU_HEADER\n"
         "\n"
-        "#ifndef DOLRECOMP_C_LOOP_CYCLE_BUDGET\n"
-        "#define DOLRECOMP_C_LOOP_CYCLE_BUDGET 256\n"
-        "#endif\n"
+        "/* ctx->downcount is the cycles left before the runtime's next event:\n"
+        "   blocks subtract their cost, and loops leave once it runs out. */\n"
         "\n"
         "/* A call between guest functions is a host call, so guest recursion is\n"
         "   host recursion. Past the limit a call site falls back to returning to\n"
@@ -1984,6 +1983,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MTMSR:
         fprintf(out, "    ctx->msr = ctx->gpr[%u];\n", inst->rS);
+        fprintf(out, "    if (ctx->msr_written) ctx->msr_written(ctx);\n");
         break;
 
     case PPC_OP_MFSR:
@@ -2309,7 +2309,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     if (has_local_returns) {
         fprintf(out, "    return;\n");
         fprintf(out, "return_dispatch_%08X:\n", func_addr);
-        fprintf(out, "    if (ctx->downcount <= -(s64)DOLRECOMP_C_LOOP_CYCLE_BUDGET) return;\n");
+        fprintf(out, "    if (ctx->downcount <= 0) return;\n");
         fprintf(out, "    switch (ctx->pc) {\n");
         for (u32 i = 0; i < count; ++i) {
             if (cfg.return_targets[i]) {

@@ -48,7 +48,11 @@ extern "C" {
 // - ABI v7 appends `flat_base`: the guest's 4 GiB effective address space,
 //   mapped 1:1 by the host (see GXRUNTIME_FLAT_MEMORY below). Modules built
 //   flat need it; others ignore it.
-#define GXRUNTIME_CPU_ABI_VERSION 7u
+// - ABI v8 appends `read_timebase`, the live timebase for mftb when the host
+//   keeps time itself, and `msr_written`, called after generated code or a
+//   native changes the MSR so a host can deliver an interrupt it unmasked.
+//   NULL keeps `timebase` and ignores MSR writes.
+#define GXRUNTIME_CPU_ABI_VERSION 8u
 #define GXRUNTIME_CPU_ABI_DOLRECOMP_PREFIX 1u
 #define GXRUNTIME_CPU_ABI_EXTERNAL_POINTER_EXTENSION 1u
 
@@ -124,6 +128,8 @@ typedef u32 (*PPCSPRRead)(CPUState* cpu, u16 spr, u32 cia);
 typedef void (*PPCSPRWrite)(CPUState* cpu, u16 spr, u32 value, u32 cia);
 typedef void (*PPCCacheControl)(CPUState* cpu, u8 operation, u32 ea, u32 cia);
 typedef void (*PPCCacheRange)(CPUState* cpu, u8 operation, u32 ea, u32 lines);
+typedef u64 (*PPCTimebaseRead)(CPUState* cpu);
+typedef void (*PPCMsrWritten)(CPUState* cpu);
 
 enum {
     PPC_CACHE_DCBST,
@@ -196,6 +202,8 @@ struct CPUState {
     u8** gather_pipe_ptr;
     u8* gather_pipe_base;
     u8* flat_base;
+    PPCTimebaseRead read_timebase;
+    PPCMsrWritten msr_written;
 };
 
 #define PPC_FAST_SLICE_SHIFT 23u
@@ -560,6 +568,9 @@ void ppc_system_call_exception(CPUState* cpu, u32 cia);
 void ppc_dsi_exception(CPUState* cpu, u32 ea, u32 cia, u32 dsisr);
 void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia);
 u32 ppc_mftb(CPUState* cpu, u16 tbr, u32 cia);
+static inline u64 ppc_timebase(CPUState* cpu) {
+    return cpu->read_timebase ? cpu->read_timebase(cpu) : cpu->timebase;
+}
 void ppc_rfi(CPUState* cpu, u32 cia);
 void ppc_dcbz_l(CPUState* cpu, u32 ea, u32 cia);
 bool ppc_psq_load(CPUState* cpu, u8 frD, u32 ea, bool w, u8 gqr, bool indexed, u32 cia);
