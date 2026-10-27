@@ -37,6 +37,14 @@ typedef struct {
 } DolRecompNative;
 void emit_set_natives(const DolRecompNative* natives, u32 count);
 
+// Every address code outside a function may enter it at, sorted (same lifetime
+// rules as the chunk table). With it set, a function's entry switch keeps only
+// those, its block leaders and the resume points after its own exits, so the
+// compiler can optimize across the instructions in between; a runtime entering
+// anywhere else finds no case and must step that instruction itself.
+// Requires `out` to be readable back (opened "w+").
+void emit_set_entry_targets(const u32* targets, u32 count);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 

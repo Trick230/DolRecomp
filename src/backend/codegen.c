@@ -26,7 +26,7 @@ typedef struct {
 } WorkerQueue;
 
 int emit_chunk_file(const ChunkJob* job) {
-    FILE* chunk = fopen(job->path, "w");
+    FILE* chunk = fopen(job->path, "w+");
     if (!chunk) {
         fprintf(stderr, "error: can't open output '%s'\n", job->path);
         return 0;

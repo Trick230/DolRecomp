@@ -1485,6 +1485,70 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
     return 1;
 }
 
+static int compare_entry_target(const void* left, const void* right) {
+    const u32 a = *(const u32*)left;
+    const u32 b = *(const u32*)right;
+    return a < b ? -1 : a > b;
+}
+
+static void add_entry_target(u32* targets, u32* count,
+                             const LoadedCodeSection* sections,
+                             u32 section_count, u32 address) {
+    for (u32 i = 0; i < section_count; i++) {
+        if (address - sections[i].address < sections[i].size && (address & 3u) == 0) {
+            targets[(*count)++] = address;
+            return;
+        }
+    }
+}
+
+// Every address code can enter a function at from outside it, for the sparse
+// entry switches: the program entry, the symbols, every direct branch target,
+// and every data-section word that points at an instruction (vtables, jump
+// tables, callbacks). Code pointers built in registers that none of these
+// cover are found at run time by the chassis stepping the instruction.
+static u32* collect_entry_targets(const DOLFile* dol,
+                                  const LoadedCodeSection* sections,
+                                  u32 section_count,
+                                  const DolRecompSymbolMap* symbols,
+                                  u32* result_count) {
+    size_t capacity = 1u + (symbols ? symbols->count : 0u);
+    for (u32 i = 0; i < section_count; i++)
+        capacity += sections[i].size / 4u;
+    for (int i = 0; i < DOL_NUM_DATA; i++)
+        capacity += dol->header.data_sizes[i] / 4u;
+    u32* targets = (u32*)malloc(capacity * sizeof(*targets));
+    if (!targets)
+        return NULL;
+    u32 count = 0;
+    add_entry_target(targets, &count, sections, section_count, dol->header.entry_point);
+    for (u32 i = 0; symbols && i < symbols->count; i++)
+        add_entry_target(targets, &count, sections, section_count, symbols->symbols[i].address);
+    for (u32 s = 0; s < section_count; s++) {
+        const LoadedCodeSection* section = &sections[s];
+        for (u32 offset = 0; section->data && offset + 4u <= section->size; offset += 4u) {
+            // Text words are not scanned as pointers: every lwz r0-r3 reads as one.
+            const PPCInst inst =
+                ppc_decode(read_be32(section->data + offset), section->address + offset);
+            if (inst.op == PPC_OP_B || inst.op == PPC_OP_BC)
+                add_entry_target(targets, &count, sections, section_count, inst.branch_target);
+        }
+    }
+    for (int i = 0; i < DOL_NUM_DATA; i++) {
+        const u8* data = dol->header.data_sizes[i] ? dol_get_data_section(dol, i) : NULL;
+        for (u32 offset = 0; data && offset + 4u <= dol->header.data_sizes[i]; offset += 4u)
+            add_entry_target(targets, &count, sections, section_count, read_be32(data + offset));
+    }
+    qsort(targets, count, sizeof(*targets), compare_entry_target);
+    u32 unique = 0;
+    for (u32 i = 0; i < count; i++) {
+        if (!unique || targets[i] != targets[unique - 1u])
+            targets[unique++] = targets[i];
+    }
+    *result_count = unique;
+    return targets;
+}
+
 int emit_dol_split(const DOLFile* dol, const char* output_path,
                           DolRecompCPU cpu, u32 jobs, int local_chunks_dir,
                           const DolRecompSymbolMap* symbols,
@@ -1526,9 +1590,23 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
         printf("natives: %u guest functions with host implementations\n", natives.count);
         emit_set_natives(natives.entries, natives.count);
     }
+    // DOLRECOMP_C_SPARSE_ENTRIES=0 keeps a case for every instruction.
+    const char* sparse = getenv("DOLRECOMP_C_SPARSE_ENTRIES");
+    u32 entry_target_count = 0;
+    u32* entry_targets = NULL;
+    if (options->backend == DOLRECOMP_BACKEND_C && !(sparse && strcmp(sparse, "0") == 0)) {
+        entry_targets = collect_entry_targets(dol, sections, section_count, symbols,
+                                              &entry_target_count);
+        if (entry_targets) {
+            printf("entry targets: %u\n", entry_target_count);
+            emit_set_entry_targets(entry_targets, entry_target_count);
+        }
+    }
     int ok = emit_code_sections_split(sections, section_count, output_path, cpu,
                                       dol->header.entry_point, jobs,
                                       local_chunks_dir, symbols, options);
+    emit_set_entry_targets(NULL, 0);
+    free(entry_targets);
     emit_set_natives(NULL, 0);
     natives_free(&natives);
     return ok;

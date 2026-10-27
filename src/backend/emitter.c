@@ -4,6 +4,9 @@
 #include "emitter.h"
 #include "backend/c_cfg.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 static u32 cr_field_shift(u8 crf) {
     return 4u * (7u - (u32)crf);
 }
@@ -331,6 +334,29 @@ static u32 g_native_count = 0;
 void emit_set_natives(const DolRecompNative* natives, u32 count) {
     g_natives = count ? natives : NULL;
     g_native_count = count ? count : 0;
+}
+
+// Addresses code can enter from outside its own function, sorted: direct
+// branch targets, symbols and code pointers in the image. NULL keeps a case in
+// the entry switch for every instruction.
+static const u32* g_entry_targets = NULL;
+static u32 g_entry_target_count = 0;
+
+void emit_set_entry_targets(const u32* targets, u32 count) {
+    g_entry_targets = count ? targets : NULL;
+    g_entry_target_count = count;
+}
+
+static bool is_entry_target(u32 addr) {
+    u32 lo = 0, hi = g_entry_target_count;
+    while (lo < hi) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (g_entry_targets[mid] < addr)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo < g_entry_target_count && g_entry_targets[lo] == addr;
 }
 
 static const DolRecompNative* native_for(u32 addr) {
@@ -2120,6 +2146,82 @@ static void emit_counted_loop(FILE* out, const PPCInst* insts,
     fprintf(out, "}\n\n");
 }
 
+// `entries` NULL gives every instruction a case.
+static void emit_entry_switch(FILE* out, const PPCInst* insts, u32 count,
+                              u32 func_addr, const u8* entries) {
+    fprintf(out, "entry_dispatch_%08X: __attribute__((unused));\n", func_addr);
+    fprintf(out, "    switch (ctx->pc) {\n");
+    for (u32 i = 0; i < count; i++) {
+        if (!entries || entries[i])
+            fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+                    insts[i].address, insts[i].address);
+    }
+    fprintf(out, "    default: return;\n");
+    fprintf(out, "    }\n");
+}
+
+// The instructions a sparse entry switch keeps a case for: the first, block
+// leaders, natives, entries from outside the function, all of a counted loop
+// (its helper can stop anywhere in it), and every instruction whose body
+// leaves the function along with the one after it, as such an exit resumes at
+// one of the two. Read back from the bodies already written to `out`; NULL,
+// meaning every instruction, if that fails.
+static u8* sparse_entries(FILE* out, long bodies_start, const PPCInst* insts,
+                          u32 count, const CFunctionCFG* cfg) {
+    const long bodies_end = ftell(out);
+    u8* entries = (u8*)calloc(count ? count : 1u, 1u);
+    char* text = NULL;
+    if (entries && bodies_end > bodies_start && fflush(out) == 0 &&
+        fseek(out, bodies_start, SEEK_SET) == 0) {
+        const size_t capacity = (size_t)(bodies_end - bodies_start);
+        text = (char*)malloc(capacity + 1u);
+        if (text)
+            text[fread(text, 1u, capacity, out)] = '\0';
+    }
+    const bool read_ok = text && !ferror(out);
+    clearerr(out);
+    if (fseek(out, 0, SEEK_END) != 0 || !read_ok) {
+        free(text);
+        free(entries);
+        return NULL;
+    }
+
+    u32 next = 0;
+    s64 current = -1;
+    char expected[32];
+    if (count)
+        snprintf(expected, sizeof(expected), "label_%08X:", insts[0].address);
+    for (char* line = text; *line;) {
+        char* end = strchr(line, '\n');
+        if (end)
+            *end = '\0';
+        if (next < count && strncmp(line, expected, 15) == 0) {
+            current = next++;
+            if (next < count)
+                snprintf(expected, sizeof(expected), "label_%08X:", insts[next].address);
+        } else if (current >= 0 && strstr(line, "return;")) {
+            entries[current] = 1;
+            if ((u32)current + 1u < count)
+                entries[current + 1] = 1;
+        }
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    free(text);
+
+    for (u32 i = 0; i < count; ++i) {
+        const u32 address = insts[i].address;
+        if (i == 0 || cfg->leaders[i] || native_for(address) || is_entry_target(address))
+            entries[i] = 1;
+        if (cfg->loop_ends[i] != UINT32_MAX) {
+            for (u32 j = i; j <= cfg->loop_ends[i] + 1u && j < count; ++j)
+                entries[j] = 1;
+        }
+    }
+    return entries;
+}
+
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     u32 func_end = func_addr + count * 4u;
     CFunctionCFG cfg;
@@ -2141,14 +2243,14 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     }
 
     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
-    fprintf(out, "entry_dispatch_%08X: __attribute__((unused));\n", func_addr);
-    fprintf(out, "    switch (ctx->pc) {\n");
-    for (u32 i = 0; i < count; i++) {
-        fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
-                insts[i].address, insts[i].address);
+    // A sparse entry switch goes after the bodies, once they show which
+    // instructions an exit can resume at.
+    const long bodies_start = g_entry_targets ? ftell(out) : -1L;
+    if (bodies_start >= 0) {
+        fprintf(out, "    goto entry_dispatch_%08X;\n", func_addr);
+    } else {
+        emit_entry_switch(out, insts, count, func_addr, NULL);
     }
-    fprintf(out, "    default: return;\n");
-    fprintf(out, "    }\n");
 
     for (u32 i = 0; i < count; i++) {
         fprintf(out, "label_%08X:\n", insts[i].address);
@@ -2217,6 +2319,12 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
         }
         fprintf(out, "    default: return;\n");
         fprintf(out, "    }\n");
+    }
+    if (bodies_start >= 0) {
+        u8* entries = sparse_entries(out, bodies_start, insts, count, &cfg);
+        fprintf(out, "    return;\n");
+        emit_entry_switch(out, insts, count, func_addr, entries);
+        free(entries);
     }
     fprintf(out, "}\n\n");
     c_function_cfg_destroy(&cfg);
