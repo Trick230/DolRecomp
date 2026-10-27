@@ -182,20 +182,15 @@ void ppc_lazy_fp_set_enabled(bool enabled) {
 /* Slow path only. The test lives in ppc_fp_available_inline() in the header so
    generated code does not pay a call per FPU instruction to learn that MSR[FP]
    is set, which it almost always is. */
-/* Depth of the generated code's native call chain. Cross-chunk direct calls
-   turn guest recursion into host recursion, and the generated header declares
-   this extern so every chunk shares one counter -- as a static in the header
-   each translation unit would get its own and the guard would bound nothing. */
+/* Depth of the generated code's native call chain: calls between guest
+   functions are host calls. The generated header declares this extern so
+   every source shares one counter. */
 unsigned dolrecomp_call_depth = 0;
 
-/* Cross-chunk direct calls: per-chunk "may enter directly" flags and the
-   idle-loop pc, both owned by the host. NULL keeps every call on the host. */
+/* Per-function "may enter directly" flags and the idle-loop pc, both owned by
+   the host. NULL keeps every call on the host. */
 const unsigned char* dolrecomp_direct_ok = NULL;
 u32 dolrecomp_idle_pc = 0;
-/* The same flags per 2^DOLRECOMP_DIRECT_LINE_SHIFT-byte line of MEM1, for calls
-   whose target is known only at run time; a size of 0 keeps them on the host. */
-const unsigned char* dolrecomp_direct_lines = NULL;
-u32 dolrecomp_direct_lines_size = 0;
 
 bool ppc_fp_raise_unavailable(CPUState* cpu, u32 cia) {
     ppc_take_exception(cpu, PPC_EXC_FP_UNAVAILABLE, PPC_VECTOR_FP_UNAVAILABLE, cia, 0);

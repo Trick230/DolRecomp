@@ -310,7 +310,7 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
 
 // Chunk entry addresses, sorted. Written once before the worker pool starts and
 // read-only thereafter, so no locking. NULL means "no table": every cross-chunk
-// branch takes the safe return-to-chassis path.
+// branch takes the safe return-to-runtime path.
 static const u32* g_chunk_starts = NULL;
 static const u32* g_chunk_ends = NULL;
 static u32 g_chunk_count = 0;
@@ -386,7 +386,7 @@ static s32 chunk_index_for(u32 addr) {
 
 // Enter the module at a run-time target through the host's line table, then
 // resume at `continuation` if the callee came back there (see
-// emit_cross_chunk_call for why any other pc returns to the chassis).
+// emit_cross_chunk_call for why any other pc returns to the runtime).
 static void emit_indirect_resume(FILE* out, const char* target, u32 continuation) {
     fprintf(out, "            if (dolrecomp_enter_indirect(ctx, %s) &&\n", target);
     fprintf(out, "                ctx->pc == 0x%08Xu && dolrecomp_idle_pc != 0x%08Xu)\n",
@@ -426,20 +426,18 @@ static void emit_cross_chunk_tail(FILE* out, const PPCInst* inst) {
     fprintf(out, "            return;\n");
 }
 
-// A cross-chunk `bl` whose target chunk is known: call it directly instead of
-// returning to the chassis. The chassis round trip costs two rel-section scans,
-// two IsHostCallAddress hash lookups, a ModManager dispatch and a downcount
-// flush, none of which a same-module call needs.
+// A `bl` to another function: call it directly instead of returning to the
+// runtime's dispatcher.
 //
-// The chassis validates guest code at dispatch boundaries (a chunk is hashed
-// on first entry and retired on self-modifying code), so it publishes which
-// chunks may be entered directly in dolrecomp_direct_ok, indexed like the
-// module's chunk table; NULL, the default, keeps every call on the chassis.
-// It also publishes its idle-loop pc, which must keep returning to it.
+// The runtime validates guest code before running it (a function is hashed on
+// first entry and retired on self-modifying code), so it publishes which
+// functions may be entered directly in dolrecomp_direct_ok, indexed like the
+// module's function table; NULL, the default, keeps every call on the
+// runtime. It also publishes its idle-loop pc, which must keep returning to it.
 //
 // Resume inline only if the callee came back to the instruction after the call.
 // Any other pc means it stopped early -- budget exhausted, an exception, a
-// tail-call elsewhere -- and only the chassis knows what to do next.
+// tail-call elsewhere -- and only the runtime knows what to do next.
 //
 // The prototype is declared at block scope so this needs no header plumbing;
 // the definition lives in another translation unit and the linker resolves it.
@@ -500,7 +498,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
             native = NULL;
         } else if (native &&
                    branch_target_is_local(func_start, func_end, inst->address + 4u)) {
-            // The chassis's idle-loop pc must still come back to it.
+            // The runtime's idle-loop pc must still come back to it.
             const u32 continuation = inst->address + 4u;
             fprintf(out, "            {\n");
             fprintf(out, "                bool %s(CPUState* ctx);\n", native);
@@ -652,27 +650,24 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "#define DOLRECOMP_C_LOOP_CYCLE_BUDGET 256\n"
         "#endif\n"
         "\n"
-        "/* Cross-chunk calls turn guest recursion into host recursion, and a\n"
-        "   chunk frame is not small. Without a ceiling a deep guest call chain\n"
-        "   overflows the host stack, which is a crash rather than a slow\n"
-        "   emulator. Past the limit the call site falls back to returning to\n"
-        "   the chassis, which is always correct -- ctx->pc already names the\n"
-        "   target, so the chassis simply dispatches it as it did before.\n"
-        "   The counter is plain static, not atomic: the chassis runs the module\n"
-        "   on one CPU thread. */\n"
+        "/* A call between guest functions is a host call, so guest recursion is\n"
+        "   host recursion. Past the limit a call site falls back to returning to\n"
+        "   the runtime, which is always correct -- ctx->pc already names the\n"
+        "   target, so the runtime dispatches it from an empty stack. The counter\n"
+        "   is plain static, not atomic: the runtime runs the module on one CPU\n"
+        "   thread. */\n"
         "#ifndef DOLRECOMP_C_MAX_CALL_DEPTH\n"
-        "#define DOLRECOMP_C_MAX_CALL_DEPTH 24\n"
+        "#define DOLRECOMP_C_MAX_CALL_DEPTH 256\n"
         "#endif\n"
         "extern unsigned dolrecomp_call_depth;\n"
-        "/* Published by the host; see emit_cross_chunk_call in DolRecomp. */\n"
+        "/* Published by the runtime; see emit_cross_chunk_call in DolRecomp. */\n"
         "extern const unsigned char* dolrecomp_direct_ok;\n"
         "extern u32 dolrecomp_idle_pc;\n"
-        "/* The same flags per line of MEM1 for targets known only at run time\n"
-        "   (virtual calls, jump tables, later sections); see emit_indirect_resume. */\n"
-        "#define DOLRECOMP_DIRECT_LINE_SHIFT 7\n"
-        "extern const unsigned char* dolrecomp_direct_lines;\n"
-        "extern u32 dolrecomp_direct_lines_size;\n"
-        "void dolrecomp_indirect_dispatch(CPUState* ctx, u32 address);\n"
+        "typedef void (*DolRecompFunction)(CPUState* ctx);\n"
+        "/* The runtime's function holding `target` once it has checked that\n"
+        "   function against guest RAM, else NULL. For targets known only at run\n"
+        "   time: virtual calls, function pointers, jump tables. */\n"
+        "DolRecompFunction dolrecomp_lookup(CPUState* ctx, u32 target);\n"
         "static inline int dolrecomp_call_enter(void) {\n"
         "    if (dolrecomp_call_depth >= (unsigned)DOLRECOMP_C_MAX_CALL_DEPTH)\n"
         "        return 0;\n"
@@ -683,13 +678,12 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "    if (dolrecomp_call_depth)\n"
         "        dolrecomp_call_depth--;\n"
         "}\n"
+        "/* Runs the function holding ctx->pc == target; 0 if there is none to run. */\n"
         "static inline int dolrecomp_enter_indirect(CPUState* ctx, u32 target) {\n"
-        "    const u32 offset = target - 0x80000000u;\n"
-        "    if (offset >= dolrecomp_direct_lines_size ||\n"
-        "        !dolrecomp_direct_lines[offset >> DOLRECOMP_DIRECT_LINE_SHIFT] ||\n"
-        "        !dolrecomp_call_enter())\n"
+        "    DolRecompFunction fn = dolrecomp_lookup(ctx, target);\n"
+        "    if (!fn || !dolrecomp_call_enter())\n"
         "        return 0;\n"
-        "    dolrecomp_indirect_dispatch(ctx, target);\n"
+        "    fn(ctx);\n"
         "    dolrecomp_call_leave();\n"
         "    return 1;\n"
         "}\n"
@@ -2250,6 +2244,9 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     // instructions an exit can resume at.
     const long bodies_start = g_entry_targets ? ftell(out) : -1L;
     if (bodies_start >= 0) {
+        // Calls enter at the start; the switch is for resuming.
+        fprintf(out, "    if (__builtin_expect(ctx->pc == 0x%08Xu, 1))\n", func_addr);
+        fprintf(out, "        goto label_%08X;\n", func_addr);
         fprintf(out, "    goto entry_dispatch_%08X;\n", func_addr);
     } else {
         emit_entry_switch(out, insts, count, func_addr, NULL);
@@ -2258,7 +2255,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     for (u32 i = 0; i < count; i++) {
         fprintf(out, "label_%08X:\n", insts[i].address);
         // Entry check for callers that did not try the native themselves:
-        // tail calls, indirect calls and chassis dispatch.
+        // tail calls, indirect calls and the runtime's dispatch.
         const DolRecompNative* native = native_for(insts[i].address);
         if (native) {
             fprintf(out, "    {\n");

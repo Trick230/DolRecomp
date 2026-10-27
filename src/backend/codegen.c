@@ -37,9 +37,14 @@ int emit_chunk_file(const ChunkJob* job) {
     // Flat-memory runtimes take guest memory's base from PPC_FLAT_BASE; each
     // function here loads it once into a local (emit_flat_base).
     fprintf(chunk, "#undef PPC_FLAT_BASE\n#define PPC_FLAT_BASE(cpu) dolrecomp_base\n\n");
-    if (!emit_function(chunk, job->insts, job->count, job->func_addr)) {
-        output_discard(&output);
-        return 0;
+    const u32 base = job->functions[0].start;
+    for (u32 i = 0; i < job->function_count; i++) {
+        const GuestFunction* f = &job->functions[i];
+        if (!emit_function(chunk, job->insts + (f->start - base) / 4u, (f->end - f->start) / 4u,
+                           f->start)) {
+            output_discard(&output);
+            return 0;
+        }
     }
     return output_close(&output);
 }

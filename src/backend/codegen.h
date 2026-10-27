@@ -5,14 +5,15 @@
 #include "frontend/decoder.h"
 #include "backend/emitter.h"
 #include "analysis/code_section.h"
+#include "analysis/functions.h"
 #include <stddef.h>
 
-#define EMIT_CHUNK_INSTRUCTIONS 4096u
-
+// One generated source: consecutive guest functions, each its own C function.
+// `insts` holds the decoded instructions from the first function's start.
 typedef struct {
     const PPCInst* insts;
-    u32 count;
-    u32 func_addr;
+    const GuestFunction* functions;
+    u32 function_count;
     char path[1200];
     char include_name[512];
 } ChunkJob;
