@@ -386,54 +386,60 @@ void ppc_mem_write_slow_at(CPUState* cpu, u32 cia, u32 addr, u64 value, u8 size)
 #ifndef PPC_FLAT_BASE
 #define PPC_FLAT_BASE(cpu) ((cpu)->flat_base)
 #endif
-static GXRUNTIME_ALWAYS_INLINE u64 ppc_flat_read64(const u8* base, CPUState* cpu, u32 cia, u32 addr) {
-    return PPC_FLAT_IO(addr) ? ppc_mem_read_slow_at(cpu, cia, addr, 8) : read_be64(base + addr);
+// Whether an access may reach the hardware window, read where the access is
+// written: generated chunks point it at a name that a block whose address is
+// known to be RAM (the stack, the small-data areas) shadows with 0.
+#ifndef PPC_FLAT_MAY_IO
+#define PPC_FLAT_MAY_IO 1
+#endif
+static GXRUNTIME_ALWAYS_INLINE u64 ppc_flat_read64(const u8* base, CPUState* cpu, u32 cia, u32 addr, int may_io) {
+    return may_io && PPC_FLAT_IO(addr) ? ppc_mem_read_slow_at(cpu, cia, addr, 8) : read_be64(base + addr);
 }
-static GXRUNTIME_ALWAYS_INLINE u32 ppc_flat_read32(const u8* base, CPUState* cpu, u32 cia, u32 addr) {
-    return PPC_FLAT_IO(addr) ? (u32)ppc_mem_read_slow_at(cpu, cia, addr, 4) : read_be32(base + addr);
+static GXRUNTIME_ALWAYS_INLINE u32 ppc_flat_read32(const u8* base, CPUState* cpu, u32 cia, u32 addr, int may_io) {
+    return may_io && PPC_FLAT_IO(addr) ? (u32)ppc_mem_read_slow_at(cpu, cia, addr, 4) : read_be32(base + addr);
 }
-static GXRUNTIME_ALWAYS_INLINE u16 ppc_flat_read16(const u8* base, CPUState* cpu, u32 cia, u32 addr) {
-    return PPC_FLAT_IO(addr) ? (u16)ppc_mem_read_slow_at(cpu, cia, addr, 2) : read_be16(base + addr);
+static GXRUNTIME_ALWAYS_INLINE u16 ppc_flat_read16(const u8* base, CPUState* cpu, u32 cia, u32 addr, int may_io) {
+    return may_io && PPC_FLAT_IO(addr) ? (u16)ppc_mem_read_slow_at(cpu, cia, addr, 2) : read_be16(base + addr);
 }
-static GXRUNTIME_ALWAYS_INLINE u8 ppc_flat_read8(const u8* base, CPUState* cpu, u32 cia, u32 addr) {
-    return PPC_FLAT_IO(addr) ? (u8)ppc_mem_read_slow_at(cpu, cia, addr, 1) : base[addr];
+static GXRUNTIME_ALWAYS_INLINE u8 ppc_flat_read8(const u8* base, CPUState* cpu, u32 cia, u32 addr, int may_io) {
+    return may_io && PPC_FLAT_IO(addr) ? (u8)ppc_mem_read_slow_at(cpu, cia, addr, 1) : base[addr];
 }
-static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write64(u8* base, CPUState* cpu, u32 cia, u32 addr, u64 value) {
-    if (PPC_FLAT_IO(addr)) {
+static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write64(u8* base, CPUState* cpu, u32 cia, u32 addr, u64 value, int may_io) {
+    if (may_io && PPC_FLAT_IO(addr)) {
         if (!ppc_gather_pipe_append(cpu, addr, value, 8))
             ppc_mem_write_slow_at(cpu, cia, addr, value, 8);
     } else
         write_be64(base + addr, value);
 }
-static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write32(u8* base, CPUState* cpu, u32 cia, u32 addr, u32 value) {
-    if (PPC_FLAT_IO(addr)) {
+static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write32(u8* base, CPUState* cpu, u32 cia, u32 addr, u32 value, int may_io) {
+    if (may_io && PPC_FLAT_IO(addr)) {
         if (!ppc_gather_pipe_append(cpu, addr, value, 4))
             ppc_mem_write_slow_at(cpu, cia, addr, value, 4);
     } else
         write_be32(base + addr, value);
 }
-static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write16(u8* base, CPUState* cpu, u32 cia, u32 addr, u16 value) {
-    if (PPC_FLAT_IO(addr)) {
+static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write16(u8* base, CPUState* cpu, u32 cia, u32 addr, u16 value, int may_io) {
+    if (may_io && PPC_FLAT_IO(addr)) {
         if (!ppc_gather_pipe_append(cpu, addr, value, 2))
             ppc_mem_write_slow_at(cpu, cia, addr, value, 2);
     } else
         write_be16(base + addr, value);
 }
-static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write8(u8* base, CPUState* cpu, u32 cia, u32 addr, u8 value) {
-    if (PPC_FLAT_IO(addr)) {
+static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write8(u8* base, CPUState* cpu, u32 cia, u32 addr, u8 value, int may_io) {
+    if (may_io && PPC_FLAT_IO(addr)) {
         if (!ppc_gather_pipe_append(cpu, addr, value, 1))
             ppc_mem_write_slow_at(cpu, cia, addr, value, 1);
     } else
         base[addr] = value;
 }
-#define mem_read64_at(cpu, cia, addr) ppc_flat_read64(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr))
-#define mem_read32_at(cpu, cia, addr) ppc_flat_read32(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr))
-#define mem_read16_at(cpu, cia, addr) ppc_flat_read16(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr))
-#define mem_read8_at(cpu, cia, addr) ppc_flat_read8(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr))
-#define mem_write64_at(cpu, cia, addr, v) ppc_flat_write64(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v))
-#define mem_write32_at(cpu, cia, addr, v) ppc_flat_write32(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v))
-#define mem_write16_at(cpu, cia, addr, v) ppc_flat_write16(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v))
-#define mem_write8_at(cpu, cia, addr, v) ppc_flat_write8(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v))
+#define mem_read64_at(cpu, cia, addr) ppc_flat_read64(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), PPC_FLAT_MAY_IO)
+#define mem_read32_at(cpu, cia, addr) ppc_flat_read32(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), PPC_FLAT_MAY_IO)
+#define mem_read16_at(cpu, cia, addr) ppc_flat_read16(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), PPC_FLAT_MAY_IO)
+#define mem_read8_at(cpu, cia, addr) ppc_flat_read8(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), PPC_FLAT_MAY_IO)
+#define mem_write64_at(cpu, cia, addr, v) ppc_flat_write64(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v), PPC_FLAT_MAY_IO)
+#define mem_write32_at(cpu, cia, addr, v) ppc_flat_write32(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v), PPC_FLAT_MAY_IO)
+#define mem_write16_at(cpu, cia, addr, v) ppc_flat_write16(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v), PPC_FLAT_MAY_IO)
+#define mem_write8_at(cpu, cia, addr, v) ppc_flat_write8(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr), (v), PPC_FLAT_MAY_IO)
 #else
 static GXRUNTIME_ALWAYS_INLINE u64 mem_read64_at(CPUState* cpu, u32 cia, u32 addr) {
     const u8* ptr = ppc_fast_ptr(cpu->fast_read, addr, 8);

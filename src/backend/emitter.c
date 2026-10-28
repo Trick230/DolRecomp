@@ -660,6 +660,10 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "   it took there left the CPU. */\n"
         "int dolrecomp_safepoint(CPUState* ctx, u32 pc);\n"
         "\n"
+        "/* PPC_FLAT_MAY_IO in chunk files: accesses may reach the hardware window\n"
+        "   unless a block known to address RAM shadows this with 0. */\n"
+        "static const int dolrecomp_may_io = 1;\n"
+        "\n"
         "/* A call between guest functions is a host call, so guest recursion is\n"
         "   host recursion. Past the limit a call site falls back to returning to\n"
         "   the runtime, which is always correct -- ctx->pc already names the\n"
@@ -835,6 +839,26 @@ static bool instruction_uses_cia_accessors(PPCOpcode op) {
     }
 }
 
+// D-form accesses off r1 (the stack) or the small-data bases r2 and r13: the
+// ABI keeps those registers pointing into RAM, and a 16-bit displacement
+// can't take them to the hardware window, so the access skips the IO check.
+static bool instruction_addresses_ram(const PPCInst* inst) {
+    if (inst->rA != 1 && inst->rA != 2 && inst->rA != 13)
+        return false;
+    switch (inst->op) {
+    case PPC_OP_LWZ: case PPC_OP_LWZU: case PPC_OP_LBZ: case PPC_OP_LBZU:
+    case PPC_OP_LHZ: case PPC_OP_LHZU: case PPC_OP_LHA: case PPC_OP_LHAU:
+    case PPC_OP_LFS: case PPC_OP_LFSU: case PPC_OP_LFD: case PPC_OP_LFDU:
+    case PPC_OP_STW: case PPC_OP_STWU: case PPC_OP_STB: case PPC_OP_STBU:
+    case PPC_OP_STH: case PPC_OP_STHU:
+    case PPC_OP_STFS: case PPC_OP_STFSU: case PPC_OP_STFD: case PPC_OP_STFDU:
+    case PPC_OP_LMW: case PPC_OP_STMW:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                                         u32 func_start, u32 func_end,
                                         bool direct_backedge,
@@ -855,6 +879,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     const bool uses_cia = instruction_uses_cia_accessors(inst->op);
     if (uses_cia)
         fprintf(out, "    {\n    const u32 cia = 0x%08Xu;\n", inst->address);
+    if (uses_cia && instruction_addresses_ram(inst))
+        fprintf(out, "    const int dolrecomp_may_io = 0;\n");
 
     switch (inst->op) {
     case PPC_OP_MULLI:
