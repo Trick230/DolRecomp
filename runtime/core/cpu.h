@@ -266,6 +266,39 @@ static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u3
 u64 ppc_mem_read_slow(CPUState* cpu, u32 addr, u8 size);
 void ppc_mem_write_slow(CPUState* cpu, u32 addr, u64 value, u8 size);
 
+// A store to the write-gather pipe page that leaves the pipe short of a full
+// 32-byte burst only appends to the host's buffer: inline, so the GX commands
+// a game streams stay in its code. The store that completes a burst goes out
+// of line.
+static GXRUNTIME_ALWAYS_INLINE bool ppc_gather_pipe_append(CPUState* cpu, u32 addr, u64 value, u32 size) {
+    if ((addr & 0xFFFFF000u) != 0xCC008000u || cpu->gather_pipe_ptr == NULL)
+        return false;
+    u8* ptr = *cpu->gather_pipe_ptr;
+    if ((size_t)(ptr - cpu->gather_pipe_base) + size >= 32u)
+        return false;
+    switch (size) {
+    case 1: *ptr = (u8)value; break;
+    case 2: write_be16(ptr, (u16)value); break;
+    case 4: write_be32(ptr, (u32)value); break;
+    default: write_be64(ptr, value); break;
+    }
+    *cpu->gather_pipe_ptr = ptr + size;
+    return true;
+}
+
+// The host's lookup cache for indirect calls, which generated code reads
+// before it asks dolrecomp_lookup: direct-mapped on target >> 2, published
+// (or NULL) like dolrecomp_direct_ok. An entry whose pc is the target names a
+// function the host has checked; the host clears the table whenever a check
+// lapses.
+typedef struct DolRecompLookupEntry {
+    u32 pc;
+    s32 function;
+    void (*code)(CPUState* ctx);
+} DolRecompLookupEntry;
+extern const DolRecompLookupEntry* dolrecomp_lookup_cache;
+extern u32 dolrecomp_lookup_cache_mask;
+
 static GXRUNTIME_ALWAYS_INLINE u8* ppc_fast_ptr(u8* const* table, u32 addr, u32 size) {
     u8* slice = table[addr >> PPC_FAST_SLICE_SHIFT];
     const u32 offset = addr & (PPC_FAST_SLICE_SIZE - 1u);
@@ -366,27 +399,31 @@ static GXRUNTIME_ALWAYS_INLINE u8 ppc_flat_read8(const u8* base, CPUState* cpu, 
     return PPC_FLAT_IO(addr) ? (u8)ppc_mem_read_slow_at(cpu, cia, addr, 1) : base[addr];
 }
 static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write64(u8* base, CPUState* cpu, u32 cia, u32 addr, u64 value) {
-    if (PPC_FLAT_IO(addr))
-        ppc_mem_write_slow_at(cpu, cia, addr, value, 8);
-    else
+    if (PPC_FLAT_IO(addr)) {
+        if (!ppc_gather_pipe_append(cpu, addr, value, 8))
+            ppc_mem_write_slow_at(cpu, cia, addr, value, 8);
+    } else
         write_be64(base + addr, value);
 }
 static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write32(u8* base, CPUState* cpu, u32 cia, u32 addr, u32 value) {
-    if (PPC_FLAT_IO(addr))
-        ppc_mem_write_slow_at(cpu, cia, addr, value, 4);
-    else
+    if (PPC_FLAT_IO(addr)) {
+        if (!ppc_gather_pipe_append(cpu, addr, value, 4))
+            ppc_mem_write_slow_at(cpu, cia, addr, value, 4);
+    } else
         write_be32(base + addr, value);
 }
 static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write16(u8* base, CPUState* cpu, u32 cia, u32 addr, u16 value) {
-    if (PPC_FLAT_IO(addr))
-        ppc_mem_write_slow_at(cpu, cia, addr, value, 2);
-    else
+    if (PPC_FLAT_IO(addr)) {
+        if (!ppc_gather_pipe_append(cpu, addr, value, 2))
+            ppc_mem_write_slow_at(cpu, cia, addr, value, 2);
+    } else
         write_be16(base + addr, value);
 }
 static GXRUNTIME_ALWAYS_INLINE void ppc_flat_write8(u8* base, CPUState* cpu, u32 cia, u32 addr, u8 value) {
-    if (PPC_FLAT_IO(addr))
-        ppc_mem_write_slow_at(cpu, cia, addr, value, 1);
-    else
+    if (PPC_FLAT_IO(addr)) {
+        if (!ppc_gather_pipe_append(cpu, addr, value, 1))
+            ppc_mem_write_slow_at(cpu, cia, addr, value, 1);
+    } else
         base[addr] = value;
 }
 #define mem_read64_at(cpu, cia, addr) ppc_flat_read64(PPC_FLAT_BASE(cpu), (cpu), (cia), (addr))

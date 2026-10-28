@@ -45,26 +45,8 @@ u64 ppc_mem_read_slow(CPUState* cpu, u32 addr, u8 size) {
     }
 }
 
-// A store to the write-gather pipe page that leaves the pipe short of a full
-// 32-byte burst only appends to the host's buffer.
-static bool gather_pipe_append(CPUState* cpu, u32 addr, u64 value, u8 size) {
-    if ((addr & 0xFFFFF000u) != 0xCC008000u || cpu->gather_pipe_ptr == NULL)
-        return false;
-    u8* ptr = *cpu->gather_pipe_ptr;
-    if ((size_t)(ptr - cpu->gather_pipe_base) + size >= 32u)
-        return false;
-    switch (size) {
-    case 1: *ptr = (u8)value; break;
-    case 2: write_be16(ptr, (u16)value); break;
-    case 4: write_be32(ptr, (u32)value); break;
-    default: write_be64(ptr, value); break;
-    }
-    *cpu->gather_pipe_ptr = ptr + size;
-    return true;
-}
-
 void ppc_mem_write_slow(CPUState* cpu, u32 addr, u64 value, u8 size) {
-    if (gather_pipe_append(cpu, addr, value, size))
+    if (ppc_gather_pipe_append(cpu, addr, value, size))
         return;
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, size, &offset);
@@ -191,6 +173,9 @@ unsigned dolrecomp_call_depth = 0;
    the host. NULL keeps every call on the host. */
 const unsigned char* dolrecomp_direct_ok = NULL;
 u32 dolrecomp_idle_pc = 0;
+
+const DolRecompLookupEntry* dolrecomp_lookup_cache = NULL;
+u32 dolrecomp_lookup_cache_mask = 0;
 
 bool ppc_fp_raise_unavailable(CPUState* cpu, u32 cia) {
     ppc_take_exception(cpu, PPC_EXC_FP_UNAVAILABLE, PPC_VECTOR_FP_UNAVAILABLE, cia, 0);
