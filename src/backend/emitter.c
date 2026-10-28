@@ -513,11 +513,9 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         }
         if (local_target) {
             if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, 0x%08Xu)) {\n",
+                fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, 0x%08Xu))\n",
                         inst->branch_target);
-                fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
                 fprintf(out, "                return;\n");
-                fprintf(out, "            }\n");
             }
             fprintf(out, "            goto %s_%08X;\n", native ? "native_declined" : "label",
                     inst->branch_target);
@@ -529,11 +527,9 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     }
     if (local_backward) {
         if (direct_backedge) {
-            fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, 0x%08Xu)) {\n",
+            fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, 0x%08Xu))\n",
                     inst->branch_target);
-            fprintf(out, "                ctx->pc = 0x%08Xu;\n", inst->branch_target);
             fprintf(out, "                return;\n");
-            fprintf(out, "            }\n");
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
         } else {
             fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
@@ -651,7 +647,9 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu) {
         "   blocks subtract their cost. Once it runs out a loop backedge calls\n"
         "   the safepoint with the pc it is about to branch to; the runtime runs\n"
         "   its events there and returns 0 to go on, or nonzero (an interrupt to\n"
-        "   take, a stop or a savestate load) to leave for its dispatcher. */\n"
+        "   take, a stop or a savestate load) to leave for its dispatcher at\n"
+        "   ctx->pc, which the runtime sets: to pc, or to wherever an interrupt\n"
+        "   it took there left the CPU. */\n"
         "int dolrecomp_safepoint(CPUState* ctx, u32 pc);\n"
         "\n"
         "/* A call between guest functions is a host call, so guest recursion is\n"
