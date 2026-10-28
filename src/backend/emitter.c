@@ -485,14 +485,22 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         // A native callee resumes straight after the call, skipping both the
         // guest body and the return dispatch; if it declines, a local callee
         // is entered past its own (already tried) native check. A jump native
-        // has set the pc to resume at, so its caller leaves to the dispatcher.
+        // has set the pc to resume at: its caller goes on if that is the
+        // call's continuation, and leaves to the dispatcher otherwise.
         const DolRecompNative* native_entry = native_for(inst->branch_target);
         const char* native = native_entry ? native_entry->name : NULL;
         if (native_entry && native_entry->jump) {
+            const u32 continuation = inst->address + 4u;
             fprintf(out, "            {\n");
             fprintf(out, "                bool %s(CPUState* ctx);\n", native);
-            fprintf(out, "                if (%s(ctx))\n", native);
+            fprintf(out, "                if (%s(ctx)) {\n", native);
+            if (branch_target_is_local(func_start, func_end, continuation)) {
+                fprintf(out, "                    if (ctx->pc == 0x%08Xu && dolrecomp_idle_pc != 0x%08Xu)\n",
+                        continuation, continuation);
+                fprintf(out, "                        goto label_%08X;\n", continuation);
+            }
             fprintf(out, "                    return;\n");
+            fprintf(out, "                }\n");
             fprintf(out, "            }\n");
             native = NULL;
         } else if (native &&
