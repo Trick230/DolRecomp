@@ -78,8 +78,10 @@ add_custom_command(
 
 add_library(dr_app STATIC
     src/app/config.c
+    src/app/module_link.c
     src/app/natives.c
     src/app/recompile.c
+    src/app/rel_link.c
     src/app/rso_link.c
     src/app/setup.c
     "${DOLRECOMP_BUILTIN_SIGNATURES}")
@@ -146,7 +148,7 @@ target_link_libraries(dr_host INTERFACE dr_runtime)
 
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
-    foreach(test natives)
+    foreach(test natives rel_link)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE dr_app)
         add_test(NAME ${test} COMMAND test_${test})

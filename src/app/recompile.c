@@ -4,7 +4,7 @@
 #include "analysis/embedded_data.h"
 #include "analysis/functions.h"
 #include "app/natives.h"
-#include "app/rso_link.h"
+#include "app/module_link.h"
 #include "backend/codegen.h"
 #include "backend/emitter.h"
 #include "frontend/container/dol.h"
@@ -287,7 +287,7 @@ static int emit_sections(const Module* module, const char* out_dir, u32 entry_po
 
 // Decodes every section and finds its functions (see analysis/functions.h for
 // where their starts come from).
-static int load_module(Module* module, const DOLFile* dol, const RsoLink* rso,
+static int load_module(Module* module, const DOLFile* dol, const ModuleLink* link,
                        const DolRecompNativeList* natives, const LoadedCodeSection* sections,
                        u32 section_count, const char* out_dir) {
     memset(module, 0, sizeof(*module));
@@ -295,7 +295,7 @@ static int load_module(Module* module, const DOLFile* dol, const RsoLink* rso,
     module->section_count = section_count;
     GuestRegion data[DOL_NUM_DATA + 256];
     u32 data_count = 0;
-    u32* seeds = (u32*)malloc((1u + rso->export_count + natives->count) * sizeof(u32));
+    u32* seeds = (u32*)malloc((1u + link->entry_count + natives->count) * sizeof(u32));
     u32 seed_count = 0;
     int ok = seeds != NULL;
     for (u32 s = 0; ok && s < section_count; s++) {
@@ -318,12 +318,12 @@ static int load_module(Module* module, const DOLFile* dol, const RsoLink* rso,
             data[data_count++] = (GuestRegion){dol->header.data_addresses[i], dol->header.data_sizes[i],
                                                dol_get_data_section(dol, i)};
     }
-    for (u32 i = 0; i < rso->data_count && data_count < sizeof(data) / sizeof(data[0]); i++)
-        data[data_count++] = (GuestRegion){rso->data[i].address, rso->data[i].size, rso->data[i].bytes};
+    for (u32 i = 0; i < link->data_count && data_count < sizeof(data) / sizeof(data[0]); i++)
+        data[data_count++] = (GuestRegion){link->data[i].address, link->data[i].size, link->data[i].bytes};
     if (ok) {
         seeds[seed_count++] = dol->header.entry_point;
-        for (u32 i = 0; i < rso->export_count; i++)
-            seeds[seed_count++] = rso->exports[i];
+        for (u32 i = 0; i < link->entry_count; i++)
+            seeds[seed_count++] = link->entries[i];
         for (u32 i = 0; i < natives->count; i++)
             seeds[seed_count++] = natives->entries[i].address;
     }
@@ -357,8 +357,9 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     if (!join_path(dol_path, sizeof(dol_path), game_dir, config->dol) || !dol_load(&dol, dol_path))
         return 0;
 
-    RsoLink rso = {0};
-    if (config->sel[0] && !rso_link(&rso, config, game_dir)) {
+    ModuleLink link = {0};
+    if ((config->sel[0] && !rso_link(&link, config, game_dir)) || !rel_link(&link, config, game_dir)) {
+        module_link_free(&link);
         dol_free(&dol);
         return 0;
     }
@@ -373,17 +374,17 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
             "text", NULL, data, i, dol.header.text_offsets[i], dol.header.text_addresses[i],
             dol.header.text_sizes[i], EMBEDDED_DATA_DOL};
     }
-    // RSO text after the DOL's, numbered on from its sections.
-    if (rso.count > sizeof(sections) / sizeof(sections[0]) - section_count) {
-        fprintf(stderr, "error: too many RSO text sections\n");
-        rso_link_free(&rso);
+    // Module text after the DOL's, numbered on from its sections.
+    if (link.count > sizeof(sections) / sizeof(sections[0]) - section_count) {
+        fprintf(stderr, "error: too many module text sections\n");
+        module_link_free(&link);
         dol_free(&dol);
         return 0;
     }
-    for (u32 i = 0; i < rso.count; i++) {
+    for (u32 i = 0; i < link.count; i++) {
         sections[section_count] = (LoadedCodeSection){
-            "text", rso.text[i].module, rso.text[i].bytes, section_count, 0, rso.text[i].address,
-            rso.text[i].size, EMBEDDED_DATA_DOL};
+            "text", link.text[i].module, link.text[i].bytes, section_count, 0, link.text[i].address,
+            link.text[i].size, EMBEDDED_DATA_DOL};
         section_count++;
     }
 
@@ -414,7 +415,7 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
         goto done;
     printf("entry targets: %u\n", entry_count);
     Module module;
-    if (!load_module(&module, &dol, &rso, &natives, sections, section_count, out_dir)) {
+    if (!load_module(&module, &dol, &link, &natives, sections, section_count, out_dir)) {
         module_free(&module);
         goto done;
     }
@@ -428,7 +429,7 @@ done:
     free(entries);
     natives_free(&natives);
     natives_signatures_free(&signatures);
-    rso_link_free(&rso);
+    module_link_free(&link);
     dol_free(&dol);
     return ok;
 }

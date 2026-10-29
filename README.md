@@ -1,8 +1,8 @@
 # DolRecomp (DualizeRecomp fork)
 
-A static recompiler for Wii PowerPC (Broadway) code: it translates a game's
-`main.dol` and its RSO modules to C, ahead of time, for a host runtime to
-compile and run. This fork serves
+A static recompiler for GameCube and Wii PowerPC (Gekko, Broadway) code: it
+translates a game's `main.dol` and its RSO and REL modules to C, ahead of
+time, for a host runtime to compile and run. This fork serves
 [DualizeRecomp](https://github.com/Trick230/DualizeRecomp) and is built as
 part of it; upstream is
 [ExpansionPak/DolRecomp](https://github.com/ExpansionPak/DolRecomp).
@@ -87,8 +87,12 @@ dolrecomp extract <iso> <output dir>
 dolrecomp --setup     # download Wiimms ISO Tools for extract
 ```
 
-The config names the DOL, the natives' signature sets and the RSO modules
-with the addresses they load at; DualizeRecomp's is
+The config names the DOL, the natives' signature sets and the modules with
+the addresses they load at (and their bss): RSO modules (`[rso]`), linked
+against the static module's exports, and REL modules (`[rel]`), linked
+against the DOL and each other as `OSLink` does, with imports of a module not
+listed left as in the file. Their code is recompiled with the DOL's;
+`src/app/config.h` shows the format. DualizeRecomp's is
 `DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
 `ppc_recomp.h`, `ppc_tables.inc`, `ppc_natives.h` and `natives.txt` (what the
 signatures found).
@@ -110,5 +114,4 @@ ctest --test-dir build -C Release --output-on-failure
 
 ## Notes
 
-- Self-modifying code is not handled; such functions need natives or patches.
 - Licensed as upstream (`LICENSE`).

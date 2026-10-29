@@ -179,7 +179,7 @@ static int test_external_import_with_map(void) {
         { importer.module_id, &importer },
         { target.module_id, &target },
     };
-    RELModuleMap map = { entries, 2 };
+    RELModuleMap map = { entries, 2, false };
 
     CHECK(rel_apply_relocations(&target, &map),
           "failed to relocate target REL");

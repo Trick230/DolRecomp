@@ -295,6 +295,9 @@ bool rel_apply_relocations(RELFile* rel, const RELModuleMap* modules) {
                            import_index * REL_IMPORT_ENTRY_SIZE;
         u32 import_module = read_be32(import);
         u32 cursor = read_be32(import + 4);
+        if (modules && modules->skip_missing && import_module != 0 &&
+            import_module != rel->module_id && !find_module(modules, import_module))
+            continue;
         u32 current_section_index = 0;
         u32 current_offset = 0;
         int saw_end = 0;
@@ -534,7 +537,7 @@ bool rel_load(RELFile* rel, const char* path, u32 base_address) {
         return false;
 
     RELModuleMapEntry self_entry = { rel->module_id, rel };
-    RELModuleMap map = { &self_entry, 1 };
+    RELModuleMap map = { &self_entry, 1, false };
     if (!rel_apply_relocations(rel, &map)) {
         rel_free(rel);
         return false;

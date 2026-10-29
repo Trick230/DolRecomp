@@ -1,4 +1,4 @@
-#include "app/rso_link.h"
+#include "app/module_link.h"
 
 #include "platform/fs.h"
 
@@ -163,31 +163,8 @@ static int add_export(Export** exports, u32* count, u32* capacity, const char* n
     return 1;
 }
 
-static int add_section(RsoSection** sections, u32* count, const char* module, u32 address,
-                       const u8* bytes, u32 size) {
-    for (u32 i = 0; i < *count; i++) {
-        if ((*sections)[i].address == address)
-            return 1;
-    }
-    RsoSection* resized = (RsoSection*)realloc(*sections, (*count + 1u) * sizeof(RsoSection));
-    if (!resized)
-        return 0;
-    *sections = resized;
-    RsoSection* section = &resized[*count];
-    section->bytes = (u8*)malloc(size);
-    if (!section->bytes)
-        return 0;
-    memcpy(section->bytes, bytes, size);
-    section->module = module;
-    section->address = address;
-    section->size = size;
-    ++*count;
-    return 1;
-}
-
-int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir) {
-    memset(link, 0, sizeof(*link));
-    const u32 module_count = config->module_count;
+int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir) {
+    const u32 module_count = config->rso_module_count;
     Bytes sel = {0};
     RsoHeader sel_header;
     Module* modules = (Module*)calloc(module_count, sizeof(Module));
@@ -221,7 +198,7 @@ int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir) {
     }
 
     for (u32 m = 0; m < module_count; m++) {
-        const RecompRsoModule* placed = &config->modules[m];
+        const RecompModule* placed = &config->rso_modules[m];
         Module* module = &modules[m];
         if (!read_file(game_dir, placed->file, &module->file) ||
             !parse_header(&module->file, &module->header)) {
@@ -266,15 +243,13 @@ int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir) {
             exports[unique++] = exports[i];
     }
     export_count = unique;
-    link->exports = (u32*)malloc((export_count ? export_count : 1u) * sizeof(u32));
-    if (!link->exports)
-        goto done;
-    for (u32 i = 0; i < export_count; i++)
-        link->exports[i] = exports[i].address;
-    link->export_count = export_count;
+    for (u32 i = 0; i < export_count; i++) {
+        if (!module_link_add_entry(link, exports[i].address))
+            goto done;
+    }
 
     for (u32 m = 0; m < module_count; m++) {
-        const RecompRsoModule* placed = &config->modules[m];
+        const RecompModule* placed = &config->rso_modules[m];
         const Module* module = &modules[m];
         const Bytes* file = &module->file;
         const RsoHeader* h = &module->header;
@@ -332,8 +307,8 @@ int rso_link(RsoLink* link, const RecompConfig* config, const char* game_dir) {
                 continue;
             const bool code = index == h->prolog_section || index == h->epilog_section ||
                               index == h->unresolved_section;
-            if (!add_section(code ? &link->text : &link->data, code ? &link->count : &link->data_count,
-                             placed->file, placed->base + offset, image + offset, size))
+            if (!module_link_add_section(link, code, placed->file, placed->base + offset,
+                                         image + offset, size))
                 goto done;
         }
         printf("linked %s at 0x%08X (%u unresolved imports)\n", placed->file, placed->base, missing);
@@ -351,18 +326,5 @@ done:
     }
     free(modules);
     free(sel.data);
-    if (!ok)
-        rso_link_free(link);
     return ok;
-}
-
-void rso_link_free(RsoLink* link) {
-    for (u32 i = 0; i < link->count; i++)
-        free(link->text[i].bytes);
-    for (u32 i = 0; i < link->data_count; i++)
-        free(link->data[i].bytes);
-    free(link->text);
-    free(link->data);
-    free(link->exports);
-    memset(link, 0, sizeof(*link));
 }

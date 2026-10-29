@@ -46,6 +46,9 @@ typedef struct {
 typedef struct {
     const RELModuleMapEntry* entries;
     u32 count;
+    // Imports of a module not in the map stay as in the file (OSLink links
+    // them when that module loads) instead of failing.
+    bool skip_missing;
 } RELModuleMap;
 
 bool rel_load(RELFile* rel, const char* path, u32 base_address);

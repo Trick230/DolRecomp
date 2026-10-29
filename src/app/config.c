@@ -29,6 +29,35 @@ static int read_u32(toml_datum_t value, u32* out, const char* key) {
     return 1;
 }
 
+// A table's `modules = [{ file, base, bss }, ...]`.
+static int load_modules(const toml_table_t* table, const char* name, RecompModule* out, u32* count) {
+    char key[64];
+    const toml_array_t* modules = toml_array_in(table, "modules");
+    const int module_count = modules ? toml_array_nelem(modules) : -1;
+    if (module_count <= 0 || (u32)module_count > RECOMP_MAX_MODULES) {
+        fprintf(stderr, "error: config %s.modules needs 1..%u modules\n", name, RECOMP_MAX_MODULES);
+        return 0;
+    }
+    for (int i = 0; i < module_count; i++) {
+        const toml_table_t* entry = toml_table_at(modules, i);
+        RecompModule* module = &out[i];
+        if (!entry)
+            return 0;
+        snprintf(key, sizeof(key), "%s.modules.file", name);
+        if (!copy_string(module->file, sizeof(module->file), toml_string_in(entry, "file"), key))
+            return 0;
+        snprintf(key, sizeof(key), "%s.modules.base", name);
+        if (!read_u32(toml_int_in(entry, "base"), &module->base, key))
+            return 0;
+        module->bss = 0;
+        snprintf(key, sizeof(key), "%s.modules.bss", name);
+        if (toml_key_exists(entry, "bss") && !read_u32(toml_int_in(entry, "bss"), &module->bss, key))
+            return 0;
+    }
+    *count = (u32)module_count;
+    return 1;
+}
+
 static int load_rso(RecompConfig* config, const toml_table_t* rso) {
     if (!copy_string(config->sel, sizeof(config->sel), toml_string_in(rso, "sel"), "rso.sel"))
         return 0;
@@ -46,28 +75,7 @@ static int load_rso(RecompConfig* config, const toml_table_t* rso) {
             return 0;
     }
     config->static_section_count = (u32)section_count;
-
-    const toml_array_t* modules = toml_array_in(rso, "modules");
-    const int module_count = modules ? toml_array_nelem(modules) : -1;
-    if (module_count <= 0 || (u32)module_count > RECOMP_MAX_RSO_MODULES) {
-        fprintf(stderr, "error: config rso.modules needs 1..%u modules\n", RECOMP_MAX_RSO_MODULES);
-        return 0;
-    }
-    for (int i = 0; i < module_count; i++) {
-        const toml_table_t* entry = toml_table_at(modules, i);
-        RecompRsoModule* module = &config->modules[i];
-        if (!entry ||
-            !copy_string(module->file, sizeof(module->file), toml_string_in(entry, "file"),
-                         "rso.modules.file") ||
-            !read_u32(toml_int_in(entry, "base"), &module->base, "rso.modules.base"))
-            return 0;
-        module->bss = 0;
-        if (toml_key_exists(entry, "bss") &&
-            !read_u32(toml_int_in(entry, "bss"), &module->bss, "rso.modules.bss"))
-            return 0;
-    }
-    config->module_count = (u32)module_count;
-    return 1;
+    return load_modules(rso, "rso", config->rso_modules, &config->rso_module_count);
 }
 
 int config_load(RecompConfig* config, const char* path) {
@@ -130,7 +138,9 @@ int config_load(RecompConfig* config, const char* path) {
     }
 
     const toml_table_t* rso = toml_table_in(root, "rso");
-    ok = !rso || load_rso(config, rso);
+    const toml_table_t* rel = toml_table_in(root, "rel");
+    ok = (!rso || load_rso(config, rso)) &&
+         (!rel || load_modules(rel, "rel", config->rel_modules, &config->rel_module_count));
 
 done:
     toml_free(root);
