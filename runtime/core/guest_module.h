@@ -22,19 +22,34 @@ typedef struct GuestRange
 // pc. It leaves the pc alone with no cycles charged if it has no entry there.
 typedef void (*GuestCode)(CPUState* ctx);
 
+// A module the game loads at times into memory other code uses at other
+// times: its functions overlap the resident ones and the other overlays'.
+typedef struct GuestOverlay
+{
+    const char* name;
+    const GuestRange* code_ranges;  // sorted, non-overlapping
+    u32 num_code_ranges;
+    // Its functions' slice of the module's, tiling its code ranges.
+    u32 first_function;
+    u32 num_functions;
+} GuestOverlay;
+
 typedef struct GuestModule
 {
-    // Sorted, non-overlapping.
+    // The resident code. Sorted, non-overlapping.
     const GuestRange* code_ranges;
     u32 num_code_ranges;
-    // The functions tile the code ranges exactly, sorted. Each has the FNV-1a
-    // 64 hash of the guest text it was built from: the runtime checks guest
-    // RAM against it before running the function and again after any icache
-    // invalidation that touches it.
+    // The resident functions tile the code ranges exactly, sorted; each
+    // overlay's follow. Each has the FNV-1a 64 hash of the guest text it was
+    // built from: the runtime checks guest RAM against it before running the
+    // function and again after any icache invalidation that touches it, so
+    // of the functions over one address only the one matching RAM runs.
     const GuestRange* function_ranges;
     const GuestCode* functions;
     const u64* function_hashes;
     u32 num_functions;
+    const GuestOverlay* overlays;
+    u32 num_overlays;
 } GuestModule;
 
 extern const GuestModule g_guest_module;

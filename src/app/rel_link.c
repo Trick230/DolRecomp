@@ -64,8 +64,8 @@ int rel_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
         for (u32 i = 0; i < rel->section_count; i++) {
             const RELSection* section = &rel->sections[i];
             if (section->data &&
-                !module_link_add_section(link, section->executable, placed->file, section->address,
-                                         section->data, section->size))
+                !module_link_add_section(link, 0, section->executable, placed->file,
+                                         section->address, section->data, section->size))
                 goto done;
         }
         const u8 entry_sections[] = {(u8)rel->prolog_section, (u8)rel->epilog_section,
@@ -73,7 +73,7 @@ int rel_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
         const u32 entry_offsets[] = {rel->prolog_offset, rel->epilog_offset, rel->unresolved_offset};
         for (u32 i = 0; i < 3; i++) {
             if (entry_sections[i] &&
-                !module_link_add_entry(link, rel->sections[entry_sections[i]].address + entry_offsets[i]))
+                !module_link_add_entry(link, 0, rel->sections[entry_sections[i]].address + entry_offsets[i]))
                 goto done;
         }
         printf("linked %s at 0x%08X (module %u, %u relocations)\n", placed->file, placed->base,

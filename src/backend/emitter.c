@@ -308,17 +308,36 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
     return target >= func_start && target < func_end && ((target - func_start) & 3u) == 0;
 }
 
-// The module's function ranges, sorted. Written once before the worker pool
-// starts and read-only thereafter, so no locking. NULL means "no table": every
-// call takes the safe return-to-runtime path.
+// The callable functions' ranges, sorted, with their runtime indices and
+// name tags. Written once before the worker pool starts and read-only
+// thereafter, so no locking. NULL means "no table": every call takes the safe
+// return-to-runtime path.
 static const u32* g_function_starts = NULL;
 static const u32* g_function_ends = NULL;
+static const u32* g_function_ids = NULL;
+static const char* const* g_function_tags = NULL;
 static u32 g_function_count = 0;
+static const char* g_symbol_tag = "";
 
-void emit_set_function_table(const u32* starts, const u32* ends, u32 count) {
+void emit_set_function_table(const u32* starts, const u32* ends, const u32* ids,
+                             const char* const* tags, u32 count) {
     g_function_starts = count ? starts : NULL;
     g_function_ends = count ? ends : NULL;
+    g_function_ids = count ? ids : NULL;
+    g_function_tags = count ? tags : NULL;
     g_function_count = count ? count : 0;
+}
+
+void emit_set_symbol_tag(const char* tag) {
+    g_symbol_tag = tag ? tag : "";
+}
+
+static u32 function_id(s32 index) {
+    return g_function_ids ? g_function_ids[index] : (u32)index;
+}
+
+static const char* function_tag(s32 index) {
+    return g_function_tags && g_function_tags[index] ? g_function_tags[index] : "";
 }
 
 static const DolRecompNative* g_natives = NULL;
@@ -412,11 +431,12 @@ static void emit_tail_call(FILE* out, const PPCInst* inst) {
     }
     const s32 target_function = function_index_for(target);
     if (target_function >= 0) {
-        fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] &&\n",
-                target_function);
+        const char* tag = function_tag(target_function);
+        fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%u] &&\n",
+                function_id(target_function));
         fprintf(out, "                dolrecomp_call_enter()) {\n");
-        fprintf(out, "                void func_%08X(CPUState* ctx);\n", g_function_starts[target_function]);
-        fprintf(out, "                func_%08X(ctx);\n", g_function_starts[target_function]);
+        fprintf(out, "                void func_%s%08X(CPUState* ctx);\n", tag, g_function_starts[target_function]);
+        fprintf(out, "                func_%s%08X(ctx);\n", tag, g_function_starts[target_function]);
         fprintf(out, "                dolrecomp_call_leave();\n");
         fprintf(out, "            }\n");
     } else {
@@ -460,12 +480,13 @@ static bool emit_direct_call(FILE* out, const PPCInst* inst,
     }
 
     u32 target_start = g_function_starts[target_function];
+    const char* tag = function_tag(target_function);
     fprintf(out, "            ctx->pc = 0x%08Xu;\n", inst->branch_target);
-    fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] &&\n",
-            target_function);
+    fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%u] &&\n",
+            function_id(target_function));
     fprintf(out, "                dolrecomp_call_enter()) {\n");
-    fprintf(out, "                void func_%08X(CPUState* ctx);\n", target_start);
-    fprintf(out, "                func_%08X(ctx);\n", target_start);
+    fprintf(out, "                void func_%s%08X(CPUState* ctx);\n", tag, target_start);
+    fprintf(out, "                func_%s%08X(ctx);\n", tag, target_start);
     fprintf(out, "                dolrecomp_call_leave();\n");
     fprintf(out, "                if (ctx->pc == 0x%08Xu && dolrecomp_idle_pc != 0x%08Xu)\n",
             continuation, continuation);
@@ -2170,7 +2191,7 @@ static void emit_counted_loop(FILE* out, const PPCInst* insts,
     u32 loop_address = insts[first].address;
     u32 continuation = insts[last].address + 4u;
 
-    fprintf(out, "static void loop_%08X(CPUState* ctx) {\n", loop_address);
+    fprintf(out, "static void loop_%s%08X(CPUState* ctx) {\n", g_symbol_tag, loop_address);
     emit_flat_base(out);
     fprintf(out, "label_%08X:\n", loop_address);
     fprintf(out, "    ctx->downcount -= %u;\n", cfg->block_cycles[first]);
@@ -2278,7 +2299,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
                               cfg.loop_ends[i]);
     }
 
-    fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+    fprintf(out, "void func_%s%08X(CPUState* ctx) {\n", g_symbol_tag, func_addr);
     emit_flat_base(out);
     // A sparse entry switch goes after the bodies, once they show which
     // instructions an exit can resume at.
@@ -2314,7 +2335,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
         }
         if (cfg.loop_ends[i] != UINT32_MAX) {
             u32 continuation = insts[cfg.loop_ends[i]].address + 4u;
-            fprintf(out, "    loop_%08X(ctx);\n", insts[i].address);
+            fprintf(out, "    loop_%s%08X(ctx);\n", g_symbol_tag, insts[i].address);
             if (continuation < func_end) {
                 fprintf(out, "    if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
                         continuation, continuation);
@@ -2338,10 +2359,11 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
         const s32 next = function_index_for(func_end);
         fprintf(out, "    ctx->pc = 0x%08Xu;\n", func_end);
         if (next >= 0 && g_function_starts[next] == func_end) {
-            fprintf(out, "    if (dolrecomp_direct_ok && dolrecomp_direct_ok[%d] && dolrecomp_call_enter()) {\n",
-                    next);
-            fprintf(out, "        void func_%08X(CPUState* ctx);\n", func_end);
-            fprintf(out, "        func_%08X(ctx);\n", func_end);
+            const char* tag = function_tag(next);
+            fprintf(out, "    if (dolrecomp_direct_ok && dolrecomp_direct_ok[%u] && dolrecomp_call_enter()) {\n",
+                    function_id(next));
+            fprintf(out, "        void func_%s%08X(CPUState* ctx);\n", tag, func_end);
+            fprintf(out, "        func_%s%08X(ctx);\n", tag, func_end);
             fprintf(out, "        dolrecomp_call_leave();\n");
             fprintf(out, "    }\n");
         }

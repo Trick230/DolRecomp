@@ -92,7 +92,12 @@ The config names the DOL, the natives' signature sets and the modules with
 the addresses they load at (and their bss): RSO modules (`[rso]`), linked
 against the static module's exports, and REL modules (`[rel]`), linked
 against the DOL and each other as `OSLink` does, with imports of a module not
-listed left as in the file. Their code is recompiled with the DOL's;
+listed left as in the file. Their code is recompiled with the DOL's.
+RSO overlays (`[rso] overlays`) are modules the game loads at times into
+memory other code uses at other times, like one stage after another: each
+links against the resident modules alone and gets functions of its own
+(`func_<module>_<address>`) next to the ones it overlaps; the runtime runs, of
+the functions over a pc, the one whose hash matches guest RAM;
 `src/app/config.h` shows the format. DualizeRecomp's is
 `DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
 `ppc_recomp.h`, `ppc_tables.inc`, `ppc_natives.h` and `natives.txt` (what the

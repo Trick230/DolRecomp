@@ -163,14 +163,157 @@ static int add_export(Export** exports, u32* count, u32* capacity, const char* n
     return 1;
 }
 
+static void free_module(Module* module) {
+    free(module->file.data);
+    free(module->section_address);
+    memset(module, 0, sizeof(*module));
+}
+
+// Reads a module and places its sections where the config says it loads.
+static int place_module(Module* module, const RecompModule* placed, const char* game_dir) {
+    if (!read_file(game_dir, placed->file, &module->file) ||
+        !parse_header(&module->file, &module->header)) {
+        fprintf(stderr, "error: can't read RSO module %s\n", placed->file);
+        return 0;
+    }
+    const RsoHeader* h = &module->header;
+    module->section_address = (u32*)calloc(h->section_count ? h->section_count : 1u, sizeof(u32));
+    if (!module->section_address)
+        return 0;
+    for (u32 i = 0; i < h->section_count; i++) {
+        const u8* table = module->file.data + h->section_table + i * 8u;
+        const u32 offset = read_be32(table) & ~1u;
+        const u32 size = read_be32(table + 4);
+        if (offset != 0) {
+            module->section_address[i] = placed->base + offset;
+        } else if (size != 0) {
+            if (placed->bss == 0) {
+                fprintf(stderr, "error: %s has a bss section; give its address in the config\n",
+                        placed->file);
+                return 0;
+            }
+            module->section_address[i] = placed->bss;
+        }
+    }
+    return 1;
+}
+
+typedef int (*ExportVisitor)(void* user, const char* name, u32 address);
+
+// Calls visit for each of a placed module's exports.
+static int visit_exports(const Module* module, ExportVisitor visit, void* user) {
+    const RsoHeader* h = &module->header;
+    for (u32 i = 0; i + 16u <= h->exports_size; i += 16u) {
+        const u8* entry = module->file.data + h->exports + i;
+        const u32 section = read_be32(entry + 8);
+        if (section < h->section_count &&
+            !visit(user, cstring(&module->file, h->export_names + read_be32(entry)),
+                   module->section_address[section] + read_be32(entry + 4)))
+            return 0;
+    }
+    return 1;
+}
+
+typedef struct {
+    Export* exports;
+    u32 count;
+    u32 capacity;
+} ExportList;
+
+static int add_to_exports(void* user, const char* name, u32 address) {
+    ExportList* list = (ExportList*)user;
+    return add_export(&list->exports, &list->count, &list->capacity, name, address);
+}
+
+typedef struct {
+    ModuleLink* link;
+    u32 group;
+} EntryList;
+
+static int add_to_entries(void* user, const char* name, u32 address) {
+    (void)name;
+    EntryList* list = (EntryList*)user;
+    return module_link_add_entry(list->link, list->group, address);
+}
+
+// Relocates a placed module against the exports (sorted by name) and adds its
+// sections to the link.
+static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, const Module* module,
+                       const ExportList* exports) {
+    const Bytes* file = &module->file;
+    const RsoHeader* h = &module->header;
+    u8* image = (u8*)malloc(file->size);
+    if (!image)
+        return 0;
+    memcpy(image, file->data, file->size);
+
+    int relocated = 1;
+    for (u32 i = 0; relocated && i + 12u <= h->internals_size; i += 12u) {
+        const u8* entry = file->data + h->internals + i;
+        const u32 offset = read_be32(entry), info = read_be32(entry + 4);
+        const u32 section = info >> 8;
+        relocated = section < h->section_count &&
+                    relocate(image, file->size, offset, (u8)info,
+                             module->section_address[section] + read_be32(entry + 8),
+                             placed->base + offset);
+    }
+    // Imports nothing exports stay bound to the module's unresolved stub,
+    // which is also what the game's linker leaves them pointing at.
+    const u32 unresolved = h->unresolved_section < h->section_count
+                               ? module->section_address[h->unresolved_section] + h->unresolved_offset
+                               : 0;
+    u32 missing = 0;
+    for (u32 i = 0; relocated && i + 12u <= h->externals_size; i += 12u) {
+        const u8* entry = file->data + h->externals + i;
+        const u32 offset = read_be32(entry), info = read_be32(entry + 4);
+        if ((u64)(info >> 8) * 12u + 12u > h->imports_size) {
+            relocated = 0;
+            break;
+        }
+        const u8* import = file->data + h->imports + (info >> 8) * 12u;
+        const Export key = {cstring(file, h->import_names + read_be32(import)), 0, 0};
+        const Export* found =
+            exports->count ? (const Export*)bsearch(&key, exports->exports, exports->count,
+                                                    sizeof(Export), compare_name)
+                           : NULL;
+        missing += found == NULL;
+        relocated = relocate(image, file->size, offset, (u8)info,
+                             (found ? found->address : unresolved) + read_be32(entry + 8),
+                             placed->base + offset);
+    }
+    if (!relocated) {
+        fprintf(stderr, "error: %s: malformed or unsupported relocation\n", placed->file);
+        free(image);
+        return 0;
+    }
+
+    // Executable sections are the ones holding the prolog/epilog/unresolved
+    // entry points; RSO section tables carry no executable flag of their own.
+    int ok = 1;
+    for (u32 index = 0; ok && index < h->section_count; index++) {
+        const u8* table = file->data + h->section_table + index * 8u;
+        const u32 offset = read_be32(table) & ~1u, size = read_be32(table + 4);
+        if (offset == 0 || size == 0 || !fits(file, offset, size))
+            continue;
+        const bool code = index == h->prolog_section || index == h->epilog_section ||
+                          index == h->unresolved_section;
+        ok = module_link_add_section(link, group, code, placed->file, placed->base + offset,
+                                     image + offset, size);
+    }
+    if (ok)
+        printf("linked %s at 0x%08X (%u unresolved imports)%s\n", placed->file, placed->base, missing,
+               group ? " as an overlay" : "");
+    free(image);
+    return ok;
+}
+
 int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir) {
     const u32 module_count = config->rso_module_count;
     Bytes sel = {0};
     RsoHeader sel_header;
-    Module* modules = (Module*)calloc(module_count, sizeof(Module));
-    Export* exports = NULL;
-    u32 export_count = 0, export_capacity = 0;
-    u8* image = NULL;
+    Module* modules = (Module*)calloc(module_count ? module_count : 1u, sizeof(Module));
+    Module overlay = {0};
+    ExportList exports = {0};
     int ok = 0;
 
     if (!modules)
@@ -188,143 +331,55 @@ int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
         const u32 offset = read_be32(entry + 4), section = read_be32(entry + 8);
         const char* name = cstring(&sel, sel_header.export_names + read_be32(entry));
         if (section == SECTION_ABSOLUTE) {
-            if (!add_export(&exports, &export_count, &export_capacity, name, offset))
+            if (!add_to_exports(&exports, name, offset))
                 goto done;
         } else if (section < config->static_section_count && config->static_sections[section]) {
-            if (!add_export(&exports, &export_count, &export_capacity, name,
-                            config->static_sections[section] + offset))
+            if (!add_to_exports(&exports, name, config->static_sections[section] + offset))
                 goto done;
         }
     }
-
     for (u32 m = 0; m < module_count; m++) {
-        const RecompModule* placed = &config->rso_modules[m];
-        Module* module = &modules[m];
-        if (!read_file(game_dir, placed->file, &module->file) ||
-            !parse_header(&module->file, &module->header)) {
-            fprintf(stderr, "error: can't read RSO module %s\n", placed->file);
+        if (!place_module(&modules[m], &config->rso_modules[m], game_dir) ||
+            !visit_exports(&modules[m], add_to_exports, &exports))
             goto done;
-        }
-        const RsoHeader* h = &module->header;
-        module->section_address = (u32*)calloc(h->section_count ? h->section_count : 1u, sizeof(u32));
-        if (!module->section_address)
-            goto done;
-        for (u32 i = 0; i < h->section_count; i++) {
-            const u8* table = module->file.data + h->section_table + i * 8u;
-            const u32 offset = read_be32(table) & ~1u;
-            const u32 size = read_be32(table + 4);
-            if (offset != 0) {
-                module->section_address[i] = placed->base + offset;
-            } else if (size != 0) {
-                if (placed->bss == 0) {
-                    fprintf(stderr, "error: %s has a bss section; give its address in the config\n",
-                            placed->file);
-                    goto done;
-                }
-                module->section_address[i] = placed->bss;
-            }
-        }
-        for (u32 i = 0; i + 16u <= h->exports_size; i += 16u) {
-            const u8* entry = module->file.data + h->exports + i;
-            const u32 section = read_be32(entry + 8);
-            if (section < h->section_count &&
-                !add_export(&exports, &export_count, &export_capacity,
-                            cstring(&module->file, h->export_names + read_be32(entry)),
-                            module->section_address[section] + read_be32(entry + 4)))
-                goto done;
-        }
     }
     // A name defined twice keeps its latest definition.
-    if (export_count)
-        qsort(exports, export_count, sizeof(Export), compare_export);
+    if (exports.count)
+        qsort(exports.exports, exports.count, sizeof(Export), compare_export);
     u32 unique = 0;
-    for (u32 i = 0; i < export_count; i++) {
-        if (!unique || strcmp(exports[unique - 1u].name, exports[i].name) != 0)
-            exports[unique++] = exports[i];
+    for (u32 i = 0; i < exports.count; i++) {
+        if (!unique || strcmp(exports.exports[unique - 1u].name, exports.exports[i].name) != 0)
+            exports.exports[unique++] = exports.exports[i];
     }
-    export_count = unique;
-    for (u32 i = 0; i < export_count; i++) {
-        if (!module_link_add_entry(link, exports[i].address))
+    exports.count = unique;
+    for (u32 i = 0; i < exports.count; i++) {
+        if (!module_link_add_entry(link, 0, exports.exports[i].address))
             goto done;
     }
-
     for (u32 m = 0; m < module_count; m++) {
-        const RecompModule* placed = &config->rso_modules[m];
-        const Module* module = &modules[m];
-        const Bytes* file = &module->file;
-        const RsoHeader* h = &module->header;
-        image = (u8*)malloc(file->size);
-        if (!image)
+        if (!link_module(link, 0, &config->rso_modules[m], &modules[m], &exports))
             goto done;
-        memcpy(image, file->data, file->size);
+    }
 
-        int relocated = 1;
-        for (u32 i = 0; relocated && i + 12u <= h->internals_size; i += 12u) {
-            const u8* entry = file->data + h->internals + i;
-            const u32 offset = read_be32(entry), info = read_be32(entry + 4);
-            const u32 section = info >> 8;
-            relocated = section < h->section_count &&
-                        relocate(image, file->size, offset, (u8)info,
-                                 module->section_address[section] + read_be32(entry + 8),
-                                 placed->base + offset);
-        }
-        // Imports nothing exports stay bound to the module's unresolved stub,
-        // which is also what the game's linker leaves them pointing at.
-        const u32 unresolved = h->unresolved_section < h->section_count
-                                   ? module->section_address[h->unresolved_section] +
-                                         h->unresolved_offset
-                                   : 0;
-        u32 missing = 0;
-        for (u32 i = 0; relocated && i + 12u <= h->externals_size; i += 12u) {
-            const u8* entry = file->data + h->externals + i;
-            const u32 offset = read_be32(entry), info = read_be32(entry + 4);
-            if ((u64)(info >> 8) * 12u + 12u > h->imports_size) {
-                relocated = 0;
-                break;
-            }
-            const u8* import = file->data + h->imports + (info >> 8) * 12u;
-            const Export key = {cstring(file, h->import_names + read_be32(import)), 0, 0};
-            const Export* found =
-                export_count ? (const Export*)bsearch(&key, exports, export_count, sizeof(Export),
-                                                      compare_name)
-                             : NULL;
-            missing += found == NULL;
-            relocated = relocate(image, file->size, offset, (u8)info,
-                                 (found ? found->address : unresolved) + read_be32(entry + 8),
-                                 placed->base + offset);
-        }
-        if (!relocated) {
-            fprintf(stderr, "error: %s: malformed or unsupported relocation\n", placed->file);
+    // Each overlay links against the resident modules alone, the way it finds
+    // them when it loads; its own exports are where other code enters it.
+    for (u32 k = 0; k < config->rso_overlay_count; k++) {
+        EntryList entries = {link, k + 1u};
+        const int linked = place_module(&overlay, &config->rso_overlays[k], game_dir) &&
+                           visit_exports(&overlay, add_to_entries, &entries) &&
+                           link_module(link, k + 1u, &config->rso_overlays[k], &overlay, &exports);
+        free_module(&overlay);
+        if (!linked)
             goto done;
-        }
-
-        // Executable sections are the ones holding the prolog/epilog/unresolved
-        // entry points; RSO section tables carry no executable flag of their own.
-        for (u32 index = 0; index < h->section_count; index++) {
-            const u8* table = file->data + h->section_table + index * 8u;
-            const u32 offset = read_be32(table) & ~1u, size = read_be32(table + 4);
-            if (offset == 0 || size == 0 || !fits(file, offset, size))
-                continue;
-            const bool code = index == h->prolog_section || index == h->epilog_section ||
-                              index == h->unresolved_section;
-            if (!module_link_add_section(link, code, placed->file, placed->base + offset,
-                                         image + offset, size))
-                goto done;
-        }
-        printf("linked %s at 0x%08X (%u unresolved imports)\n", placed->file, placed->base, missing);
-        free(image);
-        image = NULL;
     }
     ok = 1;
 
 done:
-    free(image);
-    free(exports);
-    for (u32 m = 0; modules && m < module_count; m++) {
-        free(modules[m].file.data);
-        free(modules[m].section_address);
-    }
+    free(exports.exports);
+    for (u32 m = 0; modules && m < module_count; m++)
+        free_module(&modules[m]);
     free(modules);
+    free_module(&overlay);
     free(sel.data);
     return ok;
 }

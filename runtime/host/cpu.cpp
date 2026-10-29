@@ -64,25 +64,46 @@ bool RangesSorted(const GuestRange* ranges, uint32_t count)
   return true;
 }
 
-bool FunctionsTileCode(const GuestModule& desc)
+// Whether functions [first, first + count) tile the code ranges exactly.
+bool FunctionsTileCode(const GuestRange* code_ranges, uint32_t num_code_ranges, const GuestRange* functions,
+                       uint32_t first, uint32_t count)
 {
-  if (!RangesSorted(desc.function_ranges, desc.num_functions) || !desc.functions || !desc.function_hashes)
+  if (!RangesSorted(code_ranges, num_code_ranges) || !RangesSorted(functions + first, count))
     return false;
-  uint32_t function = 0;
-  for (uint32_t code = 0; code < desc.num_code_ranges; ++code)
+  uint32_t function = first;
+  const uint32_t end = first + count;
+  for (uint32_t code = 0; code < num_code_ranges; ++code)
   {
-    uint32_t cursor = desc.code_ranges[code].start;
-    while (function < desc.num_functions && desc.function_ranges[function].start < desc.code_ranges[code].end)
+    uint32_t cursor = code_ranges[code].start;
+    while (function < end && functions[function].start < code_ranges[code].end)
     {
-      if (desc.function_ranges[function].start != cursor ||
-          desc.function_ranges[function].end > desc.code_ranges[code].end)
+      if (functions[function].start != cursor || functions[function].end > code_ranges[code].end)
         return false;
-      cursor = desc.function_ranges[function++].end;
+      cursor = functions[function++].end;
     }
-    if (cursor != desc.code_ranges[code].end)
+    if (cursor != code_ranges[code].end)
       return false;
   }
-  return function == desc.num_functions;
+  return function == end;
+}
+
+bool ModuleWellFormed(const GuestModule& module)
+{
+  if (!module.functions || !module.function_hashes || (module.num_overlays && !module.overlays))
+    return false;
+  uint32_t first = module.num_overlays ? module.overlays[0].first_function : module.num_functions;
+  if (!FunctionsTileCode(module.code_ranges, module.num_code_ranges, module.function_ranges, 0, first))
+    return false;
+  for (uint32_t i = 0; i < module.num_overlays; ++i)
+  {
+    const GuestOverlay& overlay = module.overlays[i];
+    if (overlay.first_function != first ||
+        !FunctionsTileCode(overlay.code_ranges, overlay.num_code_ranges, module.function_ranges, first,
+                           overlay.num_functions))
+      return false;
+    first += overlay.num_functions;
+  }
+  return first == module.num_functions;
 }
 
 // Index of an instruction in MEM1 then MEM2, or -1.
@@ -184,7 +205,7 @@ Cpu::~Cpu()
 bool Cpu::AttachModule(uint32_t idle_pc, std::string* error)
 {
   const GuestModule& module = g_guest_module;
-  if (!RangesSorted(module.code_ranges, module.num_code_ranges) || !FunctionsTileCode(module))
+  if (!ModuleWellFormed(module))
   {
     *error = "recompiled code has malformed code or function ranges";
     return false;
@@ -201,27 +222,48 @@ void Cpu::BuildFunctionTables()
   m_function_state.assign(functions, FUNCTION_UNVERIFIED);
   m_direct_call_ok.assign(functions, 0);
 
+  // The resident functions, then each overlay's.
+  m_groups.assign(1 + m_module->num_overlays, {});
+  m_groups[0].end = m_module->num_overlays ? m_module->overlays[0].first_function : functions;
+  m_groups[0].base = 0x80000000u;
+  for (uint32_t i = 0; i < m_module->num_overlays; ++i)
+  {
+    const GuestOverlay& overlay = m_module->overlays[i];
+    FunctionGroup& group = m_groups[1 + i];
+    group.first = overlay.first_function;
+    group.end = overlay.first_function + overlay.num_functions;
+    group.base = overlay.code_ranges[0].start & ~((1u << FUNCTION_LINE_SHIFT) - 1);
+  }
+  for (FunctionGroup& group : m_groups)
+  {
+    const uint32_t mem1_end = 0x80000000u + Memory::MEM1_SIZE;
+    uint32_t code_end = group.base;
+    for (uint32_t i = group.first; i < group.end; ++i)
+    {
+      const GuestRange& function = m_module->function_ranges[i];
+      if (function.start >= group.base && function.end <= mem1_end)
+        code_end = std::max(code_end, function.end);
+    }
+    group.lines.assign((code_end - group.base + (1u << FUNCTION_LINE_SHIFT) - 1) >> FUNCTION_LINE_SHIFT,
+                       NO_FUNCTION);
+    for (uint32_t i = group.first; i < group.end; ++i)
+    {
+      const GuestRange& function = m_module->function_ranges[i];
+      if (function.start < group.base || function.end > code_end)
+        continue;
+      // Ascending, so the first function to reach a line is its first.
+      for (uint32_t line = (function.start - group.base) >> FUNCTION_LINE_SHIFT;
+           line << FUNCTION_LINE_SHIFT < function.end - group.base; ++line)
+        if (group.lines[line] == NO_FUNCTION)
+          group.lines[line] = static_cast<int32_t>(i);
+    }
+  }
+
   const uint32_t total = (Memory::MEM1_SIZE + Memory::MEM2_SIZE) >> 2;
   m_code_lines.assign((total / 8 + 63) / 64, 0);
-  uint32_t mem1_code_end = 0;
   for (uint32_t i = 0; i < functions; ++i)
   {
     const GuestRange& function = m_module->function_ranges[i];
-    if (function.start >= 0x80000000u && function.end <= 0x80000000u + Memory::MEM1_SIZE)
-      mem1_code_end = std::max(mem1_code_end, function.end - 0x80000000u);
-  }
-  m_line_function.assign((mem1_code_end + (1u << FUNCTION_LINE_SHIFT) - 1) >> FUNCTION_LINE_SHIFT, NO_FUNCTION);
-  for (uint32_t i = 0; i < functions; ++i)
-  {
-    const GuestRange& function = m_module->function_ranges[i];
-    if (function.start >= 0x80000000u && function.end <= 0x80000000u + mem1_code_end)
-    {
-      // Ascending, so the first function to reach a line is its first.
-      for (uint32_t line = (function.start - 0x80000000u) >> FUNCTION_LINE_SHIFT;
-           line << FUNCTION_LINE_SHIFT < function.end - 0x80000000u; ++line)
-        if (m_line_function[line] == NO_FUNCTION)
-          m_line_function[line] = static_cast<int32_t>(i);
-    }
     const int start = LookupIndex(function.start);
     if (start < 0)
       continue;
@@ -245,18 +287,21 @@ void Cpu::PublishDirectCalls(bool enable)
 
 int Cpu::FunctionAt(uint32_t pc) const
 {
-  const uint32_t line = (pc - 0x80000000u) >> FUNCTION_LINE_SHIFT;
-  if (line >= m_line_function.size())
-    return NO_FUNCTION;
-  int32_t index = m_line_function[line];
-  if (index == NO_FUNCTION)
-    return NO_FUNCTION;
   const GuestRange* ranges = m_module->function_ranges;
-  const uint32_t count = m_module->num_functions;
-  while (ranges[index].end <= pc)
-    if (static_cast<uint32_t>(++index) == count)
-      return NO_FUNCTION;
-  return ranges[index].start <= pc ? index : NO_FUNCTION;
+  for (const FunctionGroup& group : m_groups)
+  {
+    const uint32_t line = (pc - group.base) >> FUNCTION_LINE_SHIFT;
+    if (line >= group.lines.size())
+      continue;
+    int32_t index = group.lines[line];
+    if (index == NO_FUNCTION)
+      continue;
+    while (ranges[index].end <= pc && static_cast<uint32_t>(index) + 1 < group.end)
+      ++index;
+    if (ranges[index].start <= pc && pc < ranges[index].end && m_function_state[index] != FUNCTION_FAILED)
+      return index;
+  }
+  return NO_FUNCTION;
 }
 
 void Cpu::SetFunctionState(uint32_t index, FunctionState function_state)
@@ -296,12 +341,12 @@ const Cpu::DispatchEntry* Cpu::Dispatch(uint32_t pc)
   DispatchEntry& entry = m_dispatch_cache[(pc >> 2) & (DISPATCH_CACHE_SIZE - 1)];
   if (entry.pc == pc)
     return &entry;
-  const int function = FunctionAt(pc);
-  if (function < 0)
-    return nullptr;
-  if (m_function_state[function] == FUNCTION_UNVERIFIED)
+  // A function that fails its check drops out of FunctionAt, so the next one
+  // over pc (an overlay's) gets checked in turn.
+  int function;
+  while ((function = FunctionAt(pc)) >= 0 && m_function_state[function] == FUNCTION_UNVERIFIED)
     VerifyFunction(static_cast<uint32_t>(function));
-  if (m_function_state[function] != FUNCTION_VERIFIED)
+  if (function < 0)
     return nullptr;
   entry = {pc, function, m_module->functions[function]};
   return &entry;
@@ -334,22 +379,25 @@ bool Cpu::InvalidateICache(uint32_t address, uint32_t length)
   if (address < 0x20000000u || (address >> 30) == 3)
     address = (address & 0x1FFFFFFF) | 0x80000000u;
   const uint32_t last = address + (length - 1);
-  uint32_t lo = 0, hi = m_module->num_functions;
-  while (lo < hi)
-  {
-    const uint32_t mid = lo + (hi - lo) / 2;
-    if (m_module->function_ranges[mid].end <= address)
-      lo = mid + 1;
-    else
-      hi = mid;
-  }
   bool flush = false;
-  for (uint32_t i = lo; i < m_module->num_functions && m_module->function_ranges[i].start <= last; ++i)
-    if (m_function_state[i] != FUNCTION_UNVERIFIED)
+  for (const FunctionGroup& group : m_groups)
+  {
+    uint32_t lo = group.first, hi = group.end;
+    while (lo < hi)
     {
-      flush |= m_function_state[i] == FUNCTION_VERIFIED;
-      SetFunctionState(i, FUNCTION_UNVERIFIED);
+      const uint32_t mid = lo + (hi - lo) / 2;
+      if (m_module->function_ranges[mid].end <= address)
+        lo = mid + 1;
+      else
+        hi = mid;
     }
+    for (uint32_t i = lo; i < group.end && m_module->function_ranges[i].start <= last; ++i)
+      if (m_function_state[i] != FUNCTION_UNVERIFIED)
+      {
+        flush |= m_function_state[i] == FUNCTION_VERIFIED;
+        SetFunctionState(i, FUNCTION_UNVERIFIED);
+      }
+  }
   if (flush)
     FlushDispatchCache();
   return flush;

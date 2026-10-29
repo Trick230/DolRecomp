@@ -18,6 +18,12 @@ const GuestModule g_guest_module = {
     s_functions,
     s_function_hashes,
     sizeof(s_functions) / sizeof(s_functions[0]),
+#if DOLRECOMP_OVERLAY_COUNT
+    s_overlays,
+#else
+    NULL,
+#endif
+    DOLRECOMP_OVERLAY_COUNT,
 };
 
 void guest_set_direct_calls(const unsigned char* function_ok, u32 idle_pc)

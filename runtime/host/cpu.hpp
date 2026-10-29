@@ -242,11 +242,20 @@ private:
 
   std::vector<uint8_t> m_function_state;
   std::vector<uint8_t> m_direct_call_ok;  // FUNCTION_VERIFIED, for generated code
-  // Per 32-byte line of MEM1 up to the end of its code: the first function
-  // ending past the line's start, or NO_FUNCTION if none starts before its end.
   static constexpr uint32_t FUNCTION_LINE_SHIFT = 5;
   static constexpr int NO_FUNCTION = -1;
-  std::vector<int32_t> m_line_function;
+  // The resident functions, then each overlay's: functions [first, end), and
+  // per 32-byte line from base to the end of their MEM1 code the first
+  // function ending past the line's start, or NO_FUNCTION if none starts
+  // before its end.
+  struct FunctionGroup
+  {
+    uint32_t first;
+    uint32_t end;
+    uint32_t base;
+    std::vector<int32_t> lines;
+  };
+  std::vector<FunctionGroup> m_groups;
   // Direct-mapped by pc, ahead of the line table. Entries only name verified
   // functions, so it empties whenever one stops being verified.
   static constexpr uint32_t DISPATCH_CACHE_SIZE = 4096;

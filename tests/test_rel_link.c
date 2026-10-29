@@ -144,8 +144,8 @@ static int test_link(void) {
     CHECK(read_be32(data->bytes + 4) == A_BSS, "pointer into its bss: 0x%08X",
           read_be32(data->bytes + 4));
     CHECK(read_be32(data->bytes + 8) == 0xDEADBEEFu, "import of an absent module was linked");
-    CHECK(link.entry_count == 2 && link.entries[0] == A_BASE + 0x108 &&
-              link.entries[1] == B_BASE + 0x100,
+    CHECK(link.entry_count == 2 && link.entries[0].address == A_BASE + 0x108 &&
+              link.entries[1].address == B_BASE + 0x100,
           "entries: %u", link.entry_count);
     module_link_free(&link);
 

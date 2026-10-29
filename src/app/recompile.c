@@ -53,21 +53,22 @@ static void add_entry_target(u32* targets, u32* count, const LoadedCodeSection* 
 
 // Every address code can enter a function at from outside it, for the sparse
 // entry switches: the program entry, every direct branch target, and every
-// DOL data word that points at an instruction (vtables, jump tables,
-// callbacks). Code pointers built in registers that none of these cover are
-// found at run time by the runtime stepping the instruction.
-static u32* collect_entry_targets(const DOLFile* dol, const LoadedCodeSection* sections,
-                                  u32 section_count, u32* result_count) {
+// data word that points at an instruction (vtables, jump tables, callbacks).
+// Code pointers built in registers that none of these cover are found at run
+// time by the runtime stepping the instruction.
+static u32* collect_entry_targets(u32 entry_point, const GuestRegion* data, u32 data_count,
+                                  const LoadedCodeSection* sections, u32 section_count,
+                                  u32* result_count) {
     size_t capacity = 1u;
     for (u32 i = 0; i < section_count; i++)
         capacity += sections[i].size / 4u;
-    for (int i = 0; i < DOL_NUM_DATA; i++)
-        capacity += dol->header.data_sizes[i] / 4u;
+    for (u32 i = 0; i < data_count; i++)
+        capacity += data[i].size / 4u;
     u32* targets = (u32*)malloc(capacity * sizeof(*targets));
     if (!targets)
         return NULL;
     u32 count = 0;
-    add_entry_target(targets, &count, sections, section_count, dol->header.entry_point);
+    add_entry_target(targets, &count, sections, section_count, entry_point);
     for (u32 s = 0; s < section_count; s++) {
         const LoadedCodeSection* section = &sections[s];
         for (u32 offset = 0; offset + 4u <= section->size; offset += 4u) {
@@ -77,10 +78,9 @@ static u32* collect_entry_targets(const DOLFile* dol, const LoadedCodeSection* s
                 add_entry_target(targets, &count, sections, section_count, inst.branch_target);
         }
     }
-    for (int i = 0; i < DOL_NUM_DATA; i++) {
-        const u8* data = dol->header.data_sizes[i] ? dol_get_data_section(dol, i) : NULL;
-        for (u32 offset = 0; data && offset + 4u <= dol->header.data_sizes[i]; offset += 4u)
-            add_entry_target(targets, &count, sections, section_count, read_be32(data + offset));
+    for (u32 i = 0; i < data_count; i++) {
+        for (u32 offset = 0; data[i].bytes && offset + 4u <= data[i].size; offset += 4u)
+            add_entry_target(targets, &count, sections, section_count, read_be32(data[i].bytes + offset));
     }
     qsort(targets, count, sizeof(*targets), compare_u32);
     u32 unique = 0;
@@ -109,51 +109,108 @@ static const u8* section_bytes(const LoadedCodeSection* sections, u32 count, u32
     return NULL;
 }
 
-// Decoded text of every section, and the functions found in it.
+#define MAX_GROUP_SECTIONS (DOL_NUM_TEXT + 64)
+
+// One group's decoded text and the functions found in it: the resident code
+// (the DOL and the modules always loaded) or one overlay.
 typedef struct {
-    const LoadedCodeSection* sections;
+    char tag[64];      // what its C names carry: "" for the resident group
+    const char* name;  // an overlay's config file name
+    LoadedCodeSection sections[MAX_GROUP_SECTIONS];
     u32 section_count;
-    PPCInst* insts[DOL_NUM_TEXT + 64];
+    PPCInst* insts[MAX_GROUP_SECTIONS];
     FunctionAnalysis analysis;
+    u32* entry_targets;
+    u32 entry_target_count;
+    u32 first_id;  // its first function's index in the runtime's table
 } Module;
 
 static void module_free(Module* module) {
     for (u32 s = 0; s < module->section_count; s++)
         free(module->insts[s]);
     function_analysis_free(&module->analysis);
+    free(module->entry_targets);
 }
 
-// The runtime's view of the module: what the dispatcher covers, and per
+static const LoadedCodeSection* s_sort_sections;
+
+static int compare_section_index(const void* left, const void* right) {
+    const u32 a = s_sort_sections[*(const u32*)left].address;
+    const u32 b = s_sort_sections[*(const u32*)right].address;
+    return a < b ? -1 : a > b;
+}
+
+// A group's sections by address, for its code ranges.
+static void sort_sections(const Module* module, u32* order) {
+    for (u32 i = 0; i < module->section_count; i++)
+        order[i] = i;
+    s_sort_sections = module->sections;
+    qsort(order, module->section_count, sizeof(u32), compare_section_index);
+}
+
+// The runtime's view of the code: what the dispatcher covers, and per
 // function its range, its code and the hash of the text it was built from.
-static int write_tables(const char* path, const Module* module, const u32* order) {
+// The resident group's functions come first, then each overlay's, which also
+// lists its own code ranges.
+static int write_tables(const char* path, const Module* groups, u32 group_count) {
     OutputFile output;
     if (!output_open(&output, path, "w"))
         return 0;
     FILE* out = output.stream;
-    const FunctionAnalysis* analysis = &module->analysis;
+    u32 order[MAX_GROUP_SECTIONS];
     fprintf(out, "// Generated by DolRecomp.\n");
     fprintf(out, "static const GuestRange s_code_ranges[] = {\n");
-    for (u32 i = 0; i < module->section_count; i++) {
-        const LoadedCodeSection* section = &module->sections[order[i]];
+    sort_sections(&groups[0], order);
+    for (u32 i = 0; i < groups[0].section_count; i++) {
+        const LoadedCodeSection* section = &groups[0].sections[order[i]];
         fprintf(out, "    {0x%08Xu, 0x%08Xu},\n", section->address, section->address + section->size);
     }
     fprintf(out, "};\n");
     fprintf(out, "static const GuestRange s_function_ranges[] = {\n");
-    for (u32 i = 0; i < analysis->function_count; i++)
-        fprintf(out, "    {0x%08Xu, 0x%08Xu},\n", analysis->functions[i].start, analysis->functions[i].end);
-    fprintf(out, "};\n");
-    fprintf(out, "static const GuestCode s_functions[] = {\n");
-    for (u32 i = 0; i < analysis->function_count; i++)
-        fprintf(out, "    func_%08X,\n", analysis->functions[i].start);
-    fprintf(out, "};\n");
-    fprintf(out, "static const u64 s_function_hashes[] = {\n");
-    for (u32 i = 0; i < analysis->function_count; i++) {
-        const GuestFunction* f = &analysis->functions[i];
-        const u8* bytes = section_bytes(module->sections, module->section_count, f->start, f->end);
-        fprintf(out, "    0x%016llXull,\n",
-                (unsigned long long)(bytes ? fnv1a64(bytes, f->end - f->start) : 0));
+    for (u32 g = 0; g < group_count; g++) {
+        const FunctionAnalysis* analysis = &groups[g].analysis;
+        for (u32 i = 0; i < analysis->function_count; i++)
+            fprintf(out, "    {0x%08Xu, 0x%08Xu},\n", analysis->functions[i].start, analysis->functions[i].end);
     }
     fprintf(out, "};\n");
+    fprintf(out, "static const GuestCode s_functions[] = {\n");
+    for (u32 g = 0; g < group_count; g++) {
+        const FunctionAnalysis* analysis = &groups[g].analysis;
+        for (u32 i = 0; i < analysis->function_count; i++)
+            fprintf(out, "    func_%s%08X,\n", groups[g].tag, analysis->functions[i].start);
+    }
+    fprintf(out, "};\n");
+    fprintf(out, "static const u64 s_function_hashes[] = {\n");
+    for (u32 g = 0; g < group_count; g++) {
+        const Module* module = &groups[g];
+        for (u32 i = 0; i < module->analysis.function_count; i++) {
+            const GuestFunction* f = &module->analysis.functions[i];
+            const u8* bytes = section_bytes(module->sections, module->section_count, f->start, f->end);
+            fprintf(out, "    0x%016llXull,\n",
+                    (unsigned long long)(bytes ? fnv1a64(bytes, f->end - f->start) : 0));
+        }
+    }
+    fprintf(out, "};\n");
+    fprintf(out, "#define DOLRECOMP_OVERLAY_COUNT %uu\n", group_count - 1u);
+    if (group_count > 1) {
+        fprintf(out, "static const GuestRange s_overlay_code_ranges[] = {\n");
+        for (u32 g = 1; g < group_count; g++) {
+            sort_sections(&groups[g], order);
+            for (u32 i = 0; i < groups[g].section_count; i++) {
+                const LoadedCodeSection* section = &groups[g].sections[order[i]];
+                fprintf(out, "    {0x%08Xu, 0x%08Xu},\n", section->address, section->address + section->size);
+            }
+        }
+        fprintf(out, "};\n");
+        fprintf(out, "static const GuestOverlay s_overlays[] = {\n");
+        u32 ranges = 0;
+        for (u32 g = 1; g < group_count; g++) {
+            fprintf(out, "    {\"%s\", s_overlay_code_ranges + %u, %u, %u, %u},\n", groups[g].name, ranges,
+                    groups[g].section_count, groups[g].first_id, groups[g].analysis.function_count);
+            ranges += groups[g].section_count;
+        }
+        fprintf(out, "};\n");
+    }
     return output_close(&output);
 }
 
@@ -182,18 +239,75 @@ static int write_shards(const char* out_dir, u32 shards, char (*chunk_names)[128
     return 1;
 }
 
-static const LoadedCodeSection* s_sort_sections;
+static int overlaps_group(const Module* group, u32 start, u32 end) {
+    for (u32 s = 0; s < group->section_count; s++) {
+        const LoadedCodeSection* section = &group->sections[s];
+        if (start < section->address + section->size && section->address < end)
+            return 1;
+    }
+    return 0;
+}
 
-static int compare_section_index(const void* left, const void* right) {
-    const u32 a = s_sort_sections[*(const u32*)left].address;
-    const u32 b = s_sort_sections[*(const u32*)right].address;
-    return a < b ? -1 : a > b;
+// The functions a group's code calls directly: its own, and for an overlay
+// the resident ones it does not lie over, merged by address.
+typedef struct {
+    u32* starts;
+    u32* ends;
+    u32* ids;
+    const char** tags;
+    u32 count;
+} CallTable;
+
+static int build_call_table(CallTable* table, const Module* groups, u32 group) {
+    const FunctionAnalysis* resident = &groups[0].analysis;
+    const FunctionAnalysis* own = &groups[group].analysis;
+    const u32 capacity = resident->function_count + (group ? own->function_count : 0) + 1u;
+    table->starts = (u32*)malloc(capacity * sizeof(u32));
+    table->ends = (u32*)malloc(capacity * sizeof(u32));
+    table->ids = (u32*)malloc(capacity * sizeof(u32));
+    table->tags = (const char**)malloc(capacity * sizeof(const char*));
+    table->count = 0;
+    if (!table->starts || !table->ends || !table->ids || !table->tags)
+        return 0;
+    u32 r = 0, o = 0;
+    const u32 own_count = group ? own->function_count : 0;
+    while (r < resident->function_count || o < own_count) {
+        const GuestFunction* rf = r < resident->function_count ? &resident->functions[r] : NULL;
+        const GuestFunction* of = o < own_count ? &own->functions[o] : NULL;
+        u32 n = table->count;
+        if (rf && (!of || rf->start < of->start)) {
+            r++;
+            if (group && overlaps_group(&groups[group], rf->start, rf->end))
+                continue;
+            table->starts[n] = rf->start;
+            table->ends[n] = rf->end;
+            table->ids[n] = r - 1u;
+            table->tags[n] = NULL;
+        } else {
+            table->starts[n] = of->start;
+            table->ends[n] = of->end;
+            table->ids[n] = groups[group].first_id + o;
+            table->tags[n] = groups[group].tag;
+            o++;
+        }
+        table->count++;
+    }
+    return 1;
+}
+
+static void call_table_free(CallTable* table) {
+    free(table->starts);
+    free(table->ends);
+    free(table->ids);
+    free(table->tags);
 }
 
 // One C function per guest function, about CHUNK_INSTRUCTIONS of them to a
-// source. Every function is known before any is written, so a call between
-// two of them is a direct C call.
-static int emit_sections(const Module* module, const char* out_dir, u32 entry_point, u32 shards) {
+// source. Every function of a group is known before any is written, so a call
+// between two of them, or from an overlay to resident code, is a direct C
+// call.
+static int emit_groups(const Module* groups, u32 group_count, const char* out_dir, u32 entry_point,
+                       u32 shards) {
     char header_path[1200], chunks_dir[1200], tables_path[1200];
     if (!join_path(header_path, sizeof(header_path), out_dir, HEADER_NAME) ||
         !join_path(chunks_dir, sizeof(chunks_dir), out_dir, "chunks") ||
@@ -202,74 +316,84 @@ static int emit_sections(const Module* module, const char* out_dir, u32 entry_po
         fprintf(stderr, "error: output path is too long or can't be created\n");
         return 0;
     }
-    const FunctionAnalysis* analysis = &module->analysis;
-    const u32 function_count = analysis->function_count;
+    u32 function_count = 0;
+    for (u32 g = 0; g < group_count; g++)
+        function_count += groups[g].analysis.function_count;
     const size_t slots = function_count ? function_count : 1u;
-    u32* bounds = (u32*)malloc(slots * 2u * sizeof(u32));
     ChunkJob* jobs = (ChunkJob*)calloc(slots, sizeof(ChunkJob));
     char (*chunk_names)[128] = (char (*)[128])malloc(slots * 128u);
     int* replaced = (int*)calloc(slots, sizeof(int));
-    u32* order = (u32*)malloc((module->section_count ? module->section_count : 1u) * sizeof(u32));
     OutputFile header_output;
-    int ok = bounds && jobs && chunk_names && replaced && order && output_open(&header_output, header_path, "w");
+    int ok = jobs && chunk_names && replaced && output_open(&header_output, header_path, "w");
     if (!ok) {
-        free(bounds);
         free(jobs);
         free(chunk_names);
         free(replaced);
-        free(order);
         return 0;
     }
     FILE* header = header_output.stream;
     emit_header_for_cpu(header, DOLRECOMP_CPU_BROADWAY);
     fprintf(header, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     fprintf(header, "\n// Function entry points\n");
-    for (u32 i = 0; i < function_count; i++) {
-        bounds[i] = analysis->functions[i].start;
-        bounds[function_count + i] = analysis->functions[i].end;
-        fprintf(header, "void func_%08X(CPUState* ctx);\n", analysis->functions[i].start);
+    for (u32 g = 0; g < group_count; g++) {
+        for (u32 i = 0; i < groups[g].analysis.function_count; i++)
+            fprintf(header, "void func_%s%08X(CPUState* ctx);\n", groups[g].tag,
+                    groups[g].analysis.functions[i].start);
     }
-    emit_set_function_table(bounds, bounds + function_count, function_count);
 
-    u32 job_count = 0;
-    for (u32 s = 0; ok && s < module->section_count; s++) {
-        const LoadedCodeSection* section = &module->sections[s];
-        const u32 section_end = section->address + section->size;
-        for (u32 f = 0; ok && f < function_count;) {
-            const GuestFunction* first = &analysis->functions[f];
-            if (first->start < section->address || first->start >= section_end) {
-                f++;
-                continue;
-            }
-            u32 last = f + 1;
-            while (last < function_count && analysis->functions[last].start < section_end &&
-                   analysis->functions[last].end - first->start <= CHUNK_INSTRUCTIONS * 4u)
-                last++;
-            ChunkJob* job = &jobs[job_count];
-            job->insts = module->insts[s] + (first->start - section->address) / 4u;
-            job->functions = first;
-            job->function_count = last - f;
-            snprintf(chunk_names[job_count], 128, "chunk_%04u_%s%u_%08X.c", job_count, section->label,
-                     section->index, first->start);
-            snprintf(job->include_name, sizeof(job->include_name), HEADER_NAME);
-            job->replaced = &replaced[job_count];
-            ok = join_path(job->path, sizeof(job->path), chunks_dir, chunk_names[job_count]) != 0;
-            job_count++;
-            f = last;
-        }
-    }
     const u32 threads = host_threads();
-    printf("writing %u functions in %u chunks with %u jobs\n", function_count, job_count,
-           effective_chunk_jobs(job_count, threads));
-    ok = ok && run_chunk_jobs(jobs, job_count, threads);
-    emit_set_function_table(NULL, NULL, 0);
+    u32 job_count = 0;
+    for (u32 g = 0; ok && g < group_count; g++) {
+        const Module* module = &groups[g];
+        const FunctionAnalysis* analysis = &module->analysis;
+        CallTable calls = {0};
+        ok = build_call_table(&calls, groups, g);
+        if (ok) {
+            emit_set_function_table(calls.starts, calls.ends, g ? calls.ids : NULL,
+                                    g ? calls.tags : NULL, calls.count);
+            emit_set_symbol_tag(module->tag);
+            emit_set_entry_targets(module->entry_targets, module->entry_target_count);
+        }
+        const u32 first_job = job_count;
+        for (u32 s = 0; ok && s < module->section_count; s++) {
+            const LoadedCodeSection* section = &module->sections[s];
+            const u32 section_end = section->address + section->size;
+            for (u32 f = 0; ok && f < analysis->function_count;) {
+                const GuestFunction* first = &analysis->functions[f];
+                if (first->start < section->address || first->start >= section_end) {
+                    f++;
+                    continue;
+                }
+                u32 last = f + 1;
+                while (last < analysis->function_count && analysis->functions[last].start < section_end &&
+                       analysis->functions[last].end - first->start <= CHUNK_INSTRUCTIONS * 4u)
+                    last++;
+                ChunkJob* job = &jobs[job_count];
+                job->insts = module->insts[s] + (first->start - section->address) / 4u;
+                job->functions = first;
+                job->function_count = last - f;
+                snprintf(chunk_names[job_count], 128, "chunk_%04u_%s%s%u_%08X.c", job_count, module->tag,
+                         section->label, section->index, first->start);
+                snprintf(job->include_name, sizeof(job->include_name), HEADER_NAME);
+                job->replaced = &replaced[job_count];
+                ok = join_path(job->path, sizeof(job->path), chunks_dir, chunk_names[job_count]) != 0;
+                job_count++;
+                f = last;
+            }
+        }
+        if (ok) {
+            const u32 group_jobs = job_count - first_job;
+            printf("writing %u %sfunctions in %u chunks with %u jobs\n", analysis->function_count,
+                   g ? "overlay " : "", group_jobs, effective_chunk_jobs(group_jobs, threads));
+            ok = run_chunk_jobs(jobs + first_job, group_jobs, threads);
+        }
+        emit_set_function_table(NULL, NULL, NULL, NULL, 0);
+        emit_set_symbol_tag(NULL);
+        call_table_free(&calls);
+    }
     emit_footer(header);
 
-    for (u32 i = 0; i < module->section_count; i++)
-        order[i] = i;
-    s_sort_sections = module->sections;
-    qsort(order, module->section_count, sizeof(u32), compare_section_index);
-    ok = ok && write_tables(tables_path, module, order) &&
+    ok = ok && write_tables(tables_path, groups, group_count) &&
          write_shards(out_dir, shards, chunk_names, replaced, job_count);
     if (ok) {
         printf("done: %u chunks in %u shards\n", job_count, shards);
@@ -277,32 +401,22 @@ static int emit_sections(const Module* module, const char* out_dir, u32 entry_po
     } else {
         output_discard(&header_output);
     }
-    free(bounds);
     free(jobs);
     free(chunk_names);
     free(replaced);
-    free(order);
     return ok;
 }
 
-// Decodes every section and finds its functions (see analysis/functions.h for
-// where their starts come from).
-static int load_module(Module* module, const DOLFile* dol, const ModuleLink* link,
-                       const DolRecompNativeList* natives, const LoadedCodeSection* sections,
-                       u32 section_count, const char* out_dir) {
-    memset(module, 0, sizeof(*module));
-    module->sections = sections;
-    module->section_count = section_count;
-    GuestRegion data[DOL_NUM_DATA + 256];
-    u32 data_count = 0;
-    u32* seeds = (u32*)malloc((1u + link->entry_count + natives->count) * sizeof(u32));
-    u32 seed_count = 0;
-    int ok = seeds != NULL;
-    for (u32 s = 0; ok && s < section_count; s++) {
-        const LoadedCodeSection* section = &sections[s];
+// Decodes a group's sections and finds its functions (see analysis/functions.h
+// for where their starts come from).
+static int load_module(Module* module, const GuestRegion* data, u32 data_count, const u32* seeds,
+                       u32 seed_count) {
+    int ok = 1;
+    for (u32 s = 0; ok && s < module->section_count; s++) {
+        const LoadedCodeSection* section = &module->sections[s];
         const u32 count = section->size / 4u;
-        printf("decoding %s[%u]: %u instructions at 0x%08X\n", section->label, section->index, count,
-               section->address);
+        printf("decoding %s%s[%u]: %u instructions at 0x%08X\n", module->tag, section->label, section->index,
+               count, section->address);
         PPCInst* insts = (PPCInst*)malloc((count ? count : 1u) * sizeof(PPCInst));
         module->insts[s] = insts;
         ok = insts != NULL;
@@ -313,24 +427,9 @@ static int load_module(Module* module, const DOLFile* dol, const ModuleLink* lin
                 insts[i].embedded_data = true;
         }
     }
-    for (int i = 0; i < DOL_NUM_DATA; i++) {
-        if (dol->header.data_sizes[i])
-            data[data_count++] = (GuestRegion){dol->header.data_addresses[i], dol->header.data_sizes[i],
-                                               dol_get_data_section(dol, i)};
-    }
-    for (u32 i = 0; i < link->data_count && data_count < sizeof(data) / sizeof(data[0]); i++)
-        data[data_count++] = (GuestRegion){link->data[i].address, link->data[i].size, link->data[i].bytes};
-    if (ok) {
-        seeds[seed_count++] = dol->header.entry_point;
-        for (u32 i = 0; i < link->entry_count; i++)
-            seeds[seed_count++] = link->entries[i];
-        for (u32 i = 0; i < natives->count; i++)
-            seeds[seed_count++] = natives->entries[i].address;
-    }
-    FunctionAnalysisInput input = {sections, (const PPCInst* const*)module->insts, section_count,
-                                   data, data_count, seeds, seed_count};
+    FunctionAnalysisInput input = {module->sections, (const PPCInst* const*)module->insts,
+                                   module->section_count, data, data_count, seeds, seed_count};
     ok = ok && analyze_functions(&module->analysis, &input);
-    free(seeds);
     if (!ok)
         return 0;
     const FunctionAnalysis* analysis = &module->analysis;
@@ -339,16 +438,43 @@ static int load_module(Module* module, const DOLFile* dol, const ModuleLink* lin
         entries += analysis->tables[i].count;
     printf("functions: %u, jump tables: %u (%u cases)\n", analysis->function_count,
            analysis->table_count, entries);
-    // For comparing against symbol maps.
+    return 1;
+}
+
+// For comparing against symbol maps: the resident functions, then each
+// overlay's with its tag.
+static int write_function_list(const Module* groups, u32 group_count, const char* out_dir) {
     char path[1200];
     FILE* out = make_dir_tree(out_dir) && join_path(path, sizeof(path), out_dir, "functions.txt")
                     ? fopen(path, "w") : NULL;
-    for (u32 i = 0; out && i < analysis->function_count; i++)
-        fprintf(out, "%08X %08X\n", analysis->functions[i].start,
-                analysis->functions[i].end - analysis->functions[i].start);
-    if (out)
-        fclose(out);
-    return 1;
+    if (!out)
+        return 0;
+    for (u32 g = 0; g < group_count; g++) {
+        const FunctionAnalysis* analysis = &groups[g].analysis;
+        for (u32 i = 0; i < analysis->function_count; i++) {
+            fprintf(out, "%08X %08X%s%s\n", analysis->functions[i].start,
+                    analysis->functions[i].end - analysis->functions[i].start, g ? " " : "",
+                    groups[g].name ? groups[g].name : "");
+        }
+    }
+    return fclose(out) == 0;
+}
+
+// The C name tag of an overlay: its file name without the directory and
+// extension, as an identifier, then '_'.
+static void overlay_tag(char* tag, size_t size, const char* file) {
+    const char* name = file;
+    for (const char* p = file; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            name = p + 1;
+    }
+    size_t n = 0;
+    for (; name[n] && name[n] != '.' && n + 2 < size; n++) {
+        const char c = name[n];
+        tag[n] = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? c : '_';
+    }
+    tag[n++] = '_';
+    tag[n] = 0;
 }
 
 int recompile(const RecompConfig* config, const char* game_dir, const char* out_dir) {
@@ -357,76 +483,115 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     if (!join_path(dol_path, sizeof(dol_path), game_dir, config->dol) || !dol_load(&dol, dol_path))
         return 0;
 
+    const u32 group_count = 1u + config->rso_overlay_count;
+    Module* groups = (Module*)calloc(group_count, sizeof(Module));
     ModuleLink link = {0};
-    if ((config->sel[0] && !rso_link(&link, config, game_dir)) || !rel_link(&link, config, game_dir)) {
+    if (!groups || (config->sel[0] && !rso_link(&link, config, game_dir)) || !rel_link(&link, config, game_dir)) {
+        free(groups);
         module_link_free(&link);
         dol_free(&dol);
         return 0;
     }
 
-    LoadedCodeSection sections[DOL_NUM_TEXT + 64];
-    u32 section_count = 0;
+    // The resident group: the DOL's text, then the resident modules',
+    // numbered on from its sections; each overlay's text in its own group.
+    Module* resident = &groups[0];
     for (u32 i = 0; i < DOL_NUM_TEXT; i++) {
         const u8* data = dol.header.text_sizes[i] ? dol_get_text_section(&dol, (int)i) : NULL;
         if (!data)
             continue;
-        sections[section_count++] = (LoadedCodeSection){
+        resident->sections[resident->section_count++] = (LoadedCodeSection){
             "text", NULL, data, i, dol.header.text_offsets[i], dol.header.text_addresses[i],
             dol.header.text_sizes[i], EMBEDDED_DATA_DOL};
     }
-    // Module text after the DOL's, numbered on from its sections.
-    if (link.count > sizeof(sections) / sizeof(sections[0]) - section_count) {
-        fprintf(stderr, "error: too many module text sections\n");
-        module_link_free(&link);
-        dol_free(&dol);
-        return 0;
+    int ok = 1;
+    for (u32 g = 1; g < group_count; g++) {
+        groups[g].name = config->rso_overlays[g - 1u].file;
+        overlay_tag(groups[g].tag, sizeof(groups[g].tag), groups[g].name);
     }
-    for (u32 i = 0; i < link.count; i++) {
-        sections[section_count] = (LoadedCodeSection){
-            "text", link.text[i].module, link.text[i].bytes, section_count, 0, link.text[i].address,
-            link.text[i].size, EMBEDDED_DATA_DOL};
-        section_count++;
+    for (u32 i = 0; ok && i < link.count; i++) {
+        Module* module = &groups[link.text[i].group];
+        if (module->section_count == MAX_GROUP_SECTIONS) {
+            fprintf(stderr, "error: too many module text sections\n");
+            ok = 0;
+            break;
+        }
+        module->sections[module->section_count] = (LoadedCodeSection){
+            "text", link.text[i].module, link.text[i].bytes, module->section_count, 0,
+            link.text[i].address, link.text[i].size, EMBEDDED_DATA_DOL};
+        module->section_count++;
     }
 
-    int ok = 0;
     DolRecompNativeList natives = {0};
     NativeSignatures signatures = {0};
-    u32 entry_count = 0;
-    u32* entries = NULL;
-    for (u32 i = 0; i < config->natives_count; i++) {
-        if (!natives_load(&signatures, config->natives[i]))
-            goto done;
-    }
-    if (!natives_resolve(&natives, &signatures, sections, section_count))
-        goto done;
-    if (signatures.count)
+    GuestRegion* data = NULL;
+    u32* seeds = NULL;
+    for (u32 i = 0; ok && i < config->natives_count; i++)
+        ok = natives_load(&signatures, config->natives[i]);
+    ok = ok && natives_resolve(&natives, &signatures, resident->sections, resident->section_count);
+    if (ok && signatures.count)
         printf("natives: %u guest functions with host implementations, of %u signatures\n",
                natives.count, signatures.count);
     emit_set_natives(natives.entries, natives.count);
     char natives_header[1200];
     char natives_list[1200];
-    if (!join_path(natives_header, sizeof(natives_header), out_dir, "ppc_natives.h") ||
-        !join_path(natives_list, sizeof(natives_list), out_dir, "natives.txt") ||
-        !make_dir_tree(out_dir) || !natives_write_header(&natives, natives_header) ||
-        !natives_write_list(&natives, natives_list))
-        goto done;
-    entries = collect_entry_targets(&dol, sections, section_count, &entry_count);
-    if (!entries)
-        goto done;
-    printf("entry targets: %u\n", entry_count);
-    Module module;
-    if (!load_module(&module, &dol, &link, &natives, sections, section_count, out_dir)) {
-        module_free(&module);
-        goto done;
+    ok = ok && join_path(natives_header, sizeof(natives_header), out_dir, "ppc_natives.h") &&
+         join_path(natives_list, sizeof(natives_list), out_dir, "natives.txt") && make_dir_tree(out_dir) &&
+         natives_write_header(&natives, natives_header) && natives_write_list(&natives, natives_list);
+    if (ok) {
+        data = (GuestRegion*)malloc((DOL_NUM_DATA + link.data_count + 1u) * sizeof(GuestRegion));
+        seeds = (u32*)malloc((1u + link.entry_count + natives.count) * sizeof(u32));
+        ok = data && seeds;
     }
-    emit_set_entry_targets(entries, entry_count);
-    ok = emit_sections(&module, out_dir, dol.header.entry_point, config->shards);
-    module_free(&module);
 
-done:
+    u32 first_id = 0;
+    for (u32 g = 0; ok && g < group_count; g++) {
+        Module* module = &groups[g];
+        // Code pointers live in the group's data: the DOL's for the resident
+        // group, with the resident modules', and each overlay's own.
+        u32 data_count = 0, seed_count = 0;
+        if (g == 0) {
+            for (int i = 0; i < DOL_NUM_DATA; i++) {
+                if (dol.header.data_sizes[i])
+                    data[data_count++] = (GuestRegion){dol.header.data_addresses[i], dol.header.data_sizes[i],
+                                                       dol_get_data_section(&dol, i)};
+            }
+            seeds[seed_count++] = dol.header.entry_point;
+        }
+        const u32 dol_data = data_count;
+        for (u32 i = 0; i < link.data_count; i++) {
+            if (link.data[i].group == g)
+                data[data_count++] = (GuestRegion){link.data[i].address, link.data[i].size, link.data[i].bytes};
+        }
+        for (u32 i = 0; i < link.entry_count; i++) {
+            if (link.entries[i].group == g)
+                seeds[seed_count++] = link.entries[i].address;
+        }
+        for (u32 i = 0; g == 0 && i < natives.count; i++)
+            seeds[seed_count++] = natives.entries[i].address;
+        ok = load_module(module, data, data_count, seeds, seed_count);
+        // The resident entry targets come from the DOL's data alone.
+        module->entry_targets =
+            ok ? collect_entry_targets(g == 0 ? dol.header.entry_point : 0, g == 0 ? data : data + dol_data,
+                                       g == 0 ? dol_data : data_count - dol_data, module->sections,
+                                       module->section_count, &module->entry_target_count)
+               : NULL;
+        ok = ok && module->entry_targets;
+        if (ok && g == 0)
+            printf("entry targets: %u\n", module->entry_target_count);
+        module->first_id = first_id;
+        first_id += module->analysis.function_count;
+    }
+    ok = ok && write_function_list(groups, group_count, out_dir) &&
+         emit_groups(groups, group_count, out_dir, dol.header.entry_point, config->shards);
+
     emit_set_entry_targets(NULL, 0);
     emit_set_natives(NULL, 0);
-    free(entries);
+    for (u32 g = 0; g < group_count; g++)
+        module_free(&groups[g]);
+    free(groups);
+    free(data);
+    free(seeds);
     natives_free(&natives);
     natives_signatures_free(&signatures);
     module_link_free(&link);

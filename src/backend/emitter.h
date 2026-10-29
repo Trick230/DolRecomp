@@ -17,11 +17,18 @@ typedef enum {
 void emit_header(FILE* out);
 void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 
-// The module's functions, sorted, in the order of the runtime's function
-// table: a call to one is a direct C call guarded by its dolrecomp_direct_ok
-// flag. Call before worker emission; passing count == 0 sends every call back
-// to the runtime.
-void emit_set_function_table(const u32* starts, const u32* ends, u32 count);
+// The functions code being written can call, sorted: a call to one is a
+// direct C call guarded by its dolrecomp_direct_ok flag. ids gives each one's
+// index in the runtime's function table (NULL: its index here), tags the tag
+// its C names carry (NULL or a NULL entry: none). Call before worker emission;
+// passing count == 0 sends every call back to the runtime.
+void emit_set_function_table(const u32* starts, const u32* ends, const u32* ids,
+                             const char* const* tags, u32 count);
+
+// The tag of the functions being written: an overlay's functions share
+// addresses with other modules', so their C names (func_<tag><address>) carry
+// one. "" or NULL for none.
+void emit_set_symbol_tag(const char* tag);
 
 // A guest function with a host implementation, `bool name(CPUState*)`, that
 // the module links in. It returns true after doing the whole call (registers,
