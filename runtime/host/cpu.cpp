@@ -325,10 +325,10 @@ bool Cpu::LineMayHoldCode(uint32_t ea) const
          ((m_code_lines[index >> 9] >> ((index >> 3) & 63)) & 1) != 0;
 }
 
-void Cpu::InvalidateICache(uint32_t address, uint32_t length)
+bool Cpu::InvalidateICache(uint32_t address, uint32_t length)
 {
   if (!m_module || length == 0)
-    return;
+    return false;
   // Physical and uncached addresses name the same code as the cached mirror.
   if (address < 0x20000000u || (address >> 30) == 3)
     address = (address & 0x1FFFFFFF) | 0x80000000u;
@@ -351,6 +351,7 @@ void Cpu::InvalidateICache(uint32_t address, uint32_t length)
     }
   if (flush)
     FlushDispatchCache();
+  return flush;
 }
 
 void Cpu::ResetCodeState()
@@ -1153,36 +1154,43 @@ void Cpu::HookCacheControl(CPUState* state, uint8_t operation, uint32_t ea, uint
     cpu.InvalidateICache(ea & ~31u, 32);
 }
 
-void Cpu::HookCacheRange(CPUState* state, uint8_t operation, uint32_t ea, uint32_t lines)
+bool Cpu::HookCacheRange(CPUState* state, uint8_t operation, uint32_t ea, uint32_t lines)
 {
   Cpu& cpu = CpuOf(state);
   if (operation == PPC_CACHE_ICBI)
-  {
-    cpu.InvalidateICache(ea & ~31u, lines * 32u);
-    return;
-  }
+    return cpu.InvalidateICache(ea & ~31u, lines * 32u);
   // A data-cache op only matters on lines that hold code: the code bitmap
-  // passes over a word of 64 clear lines (2 KB) at a time.
+  // passes over a word of 64 clear lines (2 KB) at a time, and each run of
+  // code lines is invalidated at once (a game may flush a buffer that reuses
+  // an unloaded module's memory every frame).
+  bool retired = false;
+  uint32_t run = 0, run_lines = 0;
   for (uint32_t i = 0; i < lines;)
   {
     const uint32_t line = (ea & ~31u) + i * 32u;
     const int index = LookupIndex(line);
     const size_t bit = static_cast<size_t>(index) >> 3;
-    if (index < 0 || (bit >> 6) >= cpu.m_code_lines.size())
+    const bool mapped = index >= 0 && (bit >> 6) < cpu.m_code_lines.size();
+    const uint64_t code = mapped ? cpu.m_code_lines[bit >> 6] >> (bit & 63) : 0;
+    if (code & 1)
     {
+      if (run_lines && run + run_lines * 32u == line)
+        ++run_lines;
+      else
+      {
+        if (run_lines)
+          retired |= cpu.InvalidateICache(run, run_lines * 32u);
+        run = line;
+        run_lines = 1;
+      }
       ++i;
       continue;
     }
-    const uint64_t code = cpu.m_code_lines[bit >> 6] >> (bit & 63);
-    if (!code)
-    {
-      i += 64 - static_cast<uint32_t>(bit & 63);
-      continue;
-    }
-    if (code & 1)
-      cpu.InvalidateICache(line, 32);
-    ++i;
+    i += mapped && !code ? 64 - static_cast<uint32_t>(bit & 63) : 1;
   }
+  if (run_lines)
+    retired |= cpu.InvalidateICache(run, run_lines * 32u);
+  return retired;
 }
 
 uint64_t Cpu::HookReadTimebase(CPUState* state)

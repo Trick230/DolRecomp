@@ -1,11 +1,12 @@
-// Host implementations of the Revolution SDK data-cache range functions.
+// Host implementations of the Revolution SDK cache range functions.
 //
-// Each SDK function runs one dcbf/dcbst/dcbi per 32-byte line in a counted
-// loop, and the syncing variants then take a system call whose handler at
-// 0x80000C00 (copied there by OSInitSystemCall) pulses HID0[ABE] and returns.
-// The natives hand the whole range to the host's cache_range hook in one call
-// and reproduce the loop's registers, the system call's SRR0/SRR1 and the
-// handler's r9/r10 and HID0 writes, so only the time spent differs.
+// Each SDK function runs one dcbf/dcbst/dcbi/icbi per 32-byte line in a
+// counted loop, and the syncing data-cache variants then take a system call
+// whose handler at 0x80000C00 (copied there by OSInitSystemCall) pulses
+// HID0[ABE] and returns. The natives hand the whole range to the host's
+// cache_range hook in one call and reproduce the loop's registers, the system
+// call's SRR0/SRR1 and the handler's r9/r10 and HID0 writes, so only the time
+// spent differs.
 
 #include "core/cpu.h"
 
@@ -38,6 +39,7 @@ static const u32 k_system_call_handler[] = {
 #define CYCLES_RETURN 1
 #define CYCLES_SYSTEM_CALL 2
 #define CYCLES_HANDLER 7
+#define CYCLES_SYNC 2  // ICInvalidateRange's sync; isync
 
 static inline void set_cr0_unsigned_compare_zero(CPUState* ctx, u32 value) {
     const u32 bits = (value != 0 ? 0x4u : 0x2u) | ((ctx->xer >> 31) & 1u);
@@ -100,6 +102,31 @@ static bool range(CPUState* ctx, u8 operation, bool syncs, u32 sc_address) {
     ctx->downcount -= CYCLES_SETUP + (s64)CYCLES_PER_LINE * lines + CYCLES_RETURN;
     if (syncs)
         system_call(ctx, sc_address);
+    return true;
+}
+
+// ICInvalidateRange(void* addr, u32 nBytes): an icbi per line, then sync and
+// isync. When the lines held code the guest has run, the native declines:
+// the guest loop's icbi then leaves every caller to the runtime, so none
+// resumes over code that changed (the host has already retired it).
+bool rvl_ICInvalidateRange(CPUState* ctx) {
+    if (!ctx->cache_range)
+        return false;
+    const u32 start = ctx->gpr[3];
+    const u32 bytes = ctx->gpr[4];
+    const u32 lines = (bytes + (start & 31u) + 31u) >> 5;
+    if (bytes != 0 && (lines == 0 || ctx->cache_range(ctx, PPC_CACHE_ICBI, start, lines)))
+        return false;
+
+    set_cr0_unsigned_compare_zero(ctx, bytes);
+    ctx->downcount -= CYCLES_TEST;
+    if (bytes == 0)
+        return true;
+    ctx->gpr[5] = start & 31u;
+    ctx->gpr[4] = lines;
+    ctx->ctr = 0;
+    ctx->gpr[3] = start + lines * 32u;
+    ctx->downcount -= CYCLES_SETUP + (s64)CYCLES_PER_LINE * lines + CYCLES_SYNC + CYCLES_RETURN;
     return true;
 }
 

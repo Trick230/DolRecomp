@@ -87,8 +87,9 @@ public:
   // Asserted by the processor interface while any unmasked cause is set.
   void SetExternalInterrupt(bool asserted);
 
-  // Code at [address, address + length) may have changed.
-  void InvalidateICache(uint32_t address, uint32_t length);
+  // Code at [address, address + length) may have changed: by an icbi, a data
+  // cache op or a DMA. True if it retired code that had run (verified).
+  bool InvalidateICache(uint32_t address, uint32_t length);
 
   uint64_t Timebase() const;
   void SetTimebase(uint64_t value);
@@ -215,7 +216,7 @@ private:
   static uint32_t HookSprRead(CPUState* cpu, uint16_t spr, uint32_t cia);
   static void HookSprWrite(CPUState* cpu, uint16_t spr, uint32_t value, uint32_t cia);
   static void HookCacheControl(CPUState* cpu, uint8_t operation, uint32_t ea, uint32_t cia);
-  static void HookCacheRange(CPUState* cpu, uint8_t operation, uint32_t ea, uint32_t lines);
+  static bool HookCacheRange(CPUState* cpu, uint8_t operation, uint32_t ea, uint32_t lines);
   static void HookFallback(CPUState* cpu, uint32_t raw, uint32_t cia);
   static uint64_t HookReadTimebase(CPUState* cpu);
   static void HookMsrWritten(CPUState* cpu);

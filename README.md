@@ -39,7 +39,7 @@ the matched code by `define` lines there, which the recompiler writes to
 | `dr_runtime` | CPU state, memory helpers, the interpreter |
 | `dr_guest` | `guest_module.c`, compiled with the generated code |
 | `dr_natives_mwcc` | `_savegpr_N`/`_restgpr_N` and the FPR forms, `memcpy`, `__fill_mem` |
-| `dr_natives_rvl` | `OSSaveContext`/`OSLoadContext`, `OSDisableInterrupts` and friends, `OSLockMutex` and friends, `DC*Range`, `PSMTX*`/`PSVEC*` |
+| `dr_natives_rvl` | `OSSaveContext`/`OSLoadContext`, `OSDisableInterrupts` and friends, `OSLockMutex` and friends, `DC*Range`, `ICInvalidateRange`, `PSMTX*`/`PSVEC*` |
 | `dr_host` | The host runtime's CPU layer (`runtime/host`), for the host executable |
 
 The interface libraries compile their sources inside the game's library with
@@ -51,12 +51,17 @@ compiled into the host executable):
 
 - `cpu.hpp`: the dispatcher. It runs a generated function where one covers
   the pc and still holds the code it was built from (an FNV-1a hash checked on
-  first entry, dropped again by icache invalidation), through a direct-mapped
+  first entry, dropped again by icache invalidation: `icbi`, a data-cache op on
+  a code line or a device's DMA), through a direct-mapped
   cache in front of a per-line function table, and the interpreter
   (`interpreter.cpp`, with the generated code's semantics and cycle costs)
   everywhere else. It owns the SPRs, timebase and decrementer, the gather
   pipe, the locked L1 cache and its DMA, and safepoints that run due events
   inside generated loops.
+- Self-modifying code: a function whose bytes no longer match its hash runs
+  on the interpreter; one that matches again returns to generated code. An
+  invalidation that retires code the guest has run leaves every caller to the
+  dispatcher, so none resumes over code that changed.
 - Interrupts and FP-unavailable save the OSContext in host code and start in
   the OS's handler; `CallGuest` runs a guest function to its return from host
   code; guest threads run on host fibers (Windows), so a thread switch inside

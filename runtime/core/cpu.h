@@ -49,7 +49,10 @@ extern "C" {
 //   keeps time itself, and `msr_written`, called after generated code or a
 //   native changes the MSR so a host can deliver an interrupt it unmasked.
 //   NULL keeps `timebase` and ignores MSR writes.
-#define GXRUNTIME_CPU_ABI_VERSION 8u
+// - ABI v9: `cache_range` also takes icbi, and returns whether the lines held
+//   code the guest has run: a native must not resume generated code then (the
+//   caller's own code may be what changed), so it declines instead.
+#define GXRUNTIME_CPU_ABI_VERSION 9u
 #define GXRUNTIME_CPU_ABI_DOLRECOMP_PREFIX 1u
 #define GXRUNTIME_CPU_ABI_EXTERNAL_POINTER_EXTENSION 1u
 
@@ -124,7 +127,7 @@ typedef bool (*PPCHostCall)(CPUState* cpu, u32 address);
 typedef u32 (*PPCSPRRead)(CPUState* cpu, u16 spr, u32 cia);
 typedef void (*PPCSPRWrite)(CPUState* cpu, u16 spr, u32 value, u32 cia);
 typedef void (*PPCCacheControl)(CPUState* cpu, u8 operation, u32 ea, u32 cia);
-typedef void (*PPCCacheRange)(CPUState* cpu, u8 operation, u32 ea, u32 lines);
+typedef bool (*PPCCacheRange)(CPUState* cpu, u8 operation, u32 ea, u32 lines);
 typedef u64 (*PPCTimebaseRead)(CPUState* cpu);
 typedef void (*PPCMsrWritten)(CPUState* cpu);
 
