@@ -16,6 +16,7 @@ typedef struct {
     u32 function_count;
     char path[1200];
     char include_name[512];
+    int* replaced;  // set when the chunk's file changed
 } ChunkJob;
 
 typedef int (*ParallelJobFunction)(const void* job, void* user);

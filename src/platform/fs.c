@@ -137,6 +137,8 @@ int path_is_directory(const char* path) {
 
 int output_open(OutputFile* out, const char* path, const char* mode) {
     out->stream = NULL;
+    out->force = 0;
+    out->replaced = 0;
     const int length = snprintf(out->path, sizeof(out->path), "%s", path);
     if (length < 0 || (size_t)length >= sizeof(out->path)) {
         fprintf(stderr, "error: output path is too long: '%s'\n", path);
@@ -178,7 +180,7 @@ int output_close(OutputFile* out) {
         remove(out->temp);
         return 0;
     }
-    if (same_contents(out->temp, out->path)) {
+    if (!out->force && same_contents(out->temp, out->path)) {
         remove(out->temp);
         return 1;
     }
@@ -191,6 +193,7 @@ int output_close(OutputFile* out) {
         fprintf(stderr, "error: can't replace '%s'\n", out->path);
         remove(out->temp);
     }
+    out->replaced = moved;
     return moved;
 }
 

@@ -49,7 +49,9 @@ int emit_chunk_file(const ChunkJob* job) {
             return 0;
         }
     }
-    return output_close(&output);
+    const int ok = output_close(&output);
+    *job->replaced = output.replaced;
+    return ok;
 }
 
 int queue_init(WorkerQueue* queue, const void* jobs, size_t job_size,

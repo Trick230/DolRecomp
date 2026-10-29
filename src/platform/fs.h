@@ -15,11 +15,14 @@ int path_is_directory(const char* path);
 
 // A generated file, written beside its path and moved over it on close only
 // when the contents changed, so what depends on it doesn't rebuild for an
-// identical result.
+// identical result. `force` moves it over regardless; `replaced` says whether
+// output_close moved it.
 typedef struct {
     FILE* stream;
     char path[1200];
     char temp[1210];
+    int force;
+    int replaced;
 } OutputFile;
 
 int output_open(OutputFile* out, const char* path, const char* mode);
