@@ -113,6 +113,20 @@ target_sources(dr_natives_rvl INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_os.c)
 target_link_libraries(dr_natives_rvl INTERFACE dr_runtime)
 
+# The host runtime's CPU layer (C++20), compiled into the host executable with
+# its flags: the dispatcher over the generated functions with the interpreter
+# beside it, guest calls, guest threads on fibers, the event scheduler, guest
+# memory and the savestate stream. The host derives its machine from
+# dolrecomp::CpuHost (runtime/host/cpu.hpp) and defines its members. A
+# GameCube host defines DOLRECOMP_GAMECUBE (no MEM2, Gekko's clock).
+add_library(dr_host INTERFACE)
+target_sources(dr_host INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/cpu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/interpreter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/memory.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/scheduler.cpp)
+target_link_libraries(dr_host INTERFACE dr_runtime)
+
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
     foreach(test natives)

@@ -37,10 +37,39 @@ game's natives list, which the recompiler writes to `ppc_natives.h`.
 | `dr_guest` | `guest_module.c`, compiled with the generated code |
 | `dr_natives_mwcc` | `_savegpr_N`/`_restgpr_N` and the FPR forms, `memcpy`, `__fill_mem` |
 | `dr_natives_rvl` | `OSSaveContext`/`OSLoadContext`, `OSDisableInterrupts` and friends, `OSLockMutex` and friends, `DC*Range`, `PSMTX*`/`PSVEC*` |
+| `dr_host` | The host runtime's CPU layer (`runtime/host`), for the host executable |
 
 The interface libraries compile their sources inside the game's library with
 its flags, so the natives inline across the generated code as if they were the
 game's own.
+
+`runtime/host` is the CPU layer of a host runtime, in C++20 (`dr_host`,
+compiled into the host executable):
+
+- `cpu.hpp`: the dispatcher. It runs a generated function where one covers
+  the pc and still holds the code it was built from (an FNV-1a hash checked on
+  first entry, dropped again by icache invalidation), through a direct-mapped
+  cache in front of a per-line function table, and the interpreter
+  (`interpreter.cpp`, with the generated code's semantics and cycle costs)
+  everywhere else. It owns the SPRs, timebase and decrementer, the gather
+  pipe, the locked L1 cache and its DMA, and safepoints that run due events
+  inside generated loops.
+- Interrupts and FP-unavailable save the OSContext in host code and start in
+  the OS's handler; `CallGuest` runs a guest function to its return from host
+  code; guest threads run on host fibers (Windows), so a thread switch inside
+  generated code parks the host stack instead of unwinding it. These follow
+  the Dolphin/Revolution OS, the same on GameCube and Wii.
+- `scheduler.hpp`: guest time in CPU cycles, events in a heap, slices that end
+  at the next one.
+- `memory.hpp`: the 32-bit effective space as one host reservation, with MEM1,
+  MEM2 and the locked cache as views of one section at the addresses the OS's
+  BATs give them, so generated code reaches guest memory as base + address.
+- `state_io.hpp`: the savestate stream.
+
+The host derives its machine from `dolrecomp::CpuHost` and defines its six
+members (hardware loads and stores, gather-pipe bursts, what runs after
+events and before idling); they bind at link time. A GameCube host defines
+`DOLRECOMP_GAMECUBE` (no MEM2, Gekko's 486 MHz).
 
 ## Use
 
@@ -61,8 +90,8 @@ functions from Dolphin's signature database, to find a new game's natives.
 
 ## Build
 
-CMake 3.16+ and a C11 compiler (Clang or GCC). DualizeRecomp builds it as a
-host tool; on its own:
+CMake 3.16+ and a C11 compiler (Clang or GCC); a C++20 compiler for
+`runtime/host`. DualizeRecomp builds it as a host tool; on its own:
 
 ```sh
 cmake -S . -B build

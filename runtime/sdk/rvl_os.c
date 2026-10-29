@@ -282,8 +282,8 @@ static inline void store16(u8* base, u32 offset, u16 value) {
 // The runtime (cpu/cpu.cpp): a context was loaded, which switches host fibers
 // when it is another thread's and returns once this one's is loaded again;
 // and the rest of a guest call, run up to its return to `pc`.
-void dualize_context_loaded(CPUState* ctx, u32 context);
-void dualize_run_to(CPUState* ctx, u32 pc);
+void dolrecomp_context_loaded(CPUState* ctx, u32 context);
+void dolrecomp_run_to(CPUState* ctx, u32 pc);
 
 // Resumes `context` the way OSLoadContext's closing rfi does: at its SRR0
 // with its SRR1, never at the caller.
@@ -319,7 +319,7 @@ static void resume_context(CPUState* ctx, u8* context, u32 address) {
     const u32 msr = ctx->msr & ~(PPC_MSR_EE | PPC_MSR_RI);
     ctx->msr = ((msr & ~PPC_MSR_RFI_MASK) | (ctx->srr1 & PPC_MSR_RFI_MASK)) & ~PPC_MSR_POW;
     ctx->pc = srr0 & ~3u;
-    dualize_context_loaded(ctx, address);
+    dolrecomp_context_loaded(ctx, address);
 }
 
 // void OSLoadContext(OSContext* context)
@@ -533,7 +533,7 @@ static void commit_select(CPUState* ctx, const SelectPlan* plan, u8* frame, u32 
 // runs on to its return to `caller`, where the caller's host frame goes on.
 static void finish_select(CPUState* ctx, u32 sp, u32 caller) {
     if (ctx->pc == SELECT_THREAD_SAVE_RETURN && ctx->gpr[1] == sp)
-        dualize_run_to(ctx, caller);
+        dolrecomp_run_to(ctx, caller);
 }
 
 // static OSThread* SelectThread(BOOL yield)
