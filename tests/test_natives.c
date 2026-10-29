@@ -60,6 +60,30 @@ int main(void) {
     CHECK(natives_verify(&list, &section, 1));
     natives_free(&list);
 
+    CHECK(write_text(path, "define SDA_GLOBAL -27532\n"
+                           "80001000 4 B6F2E0C4BC8017BB host_leaf\n"
+                           "define LEAF_END 0x80001004  # comment\n"));
+    CHECK(natives_load(&list, path));
+    CHECK(list.count == 1 && list.define_count == 2);
+    CHECK(strcmp(list.define_names[1], "LEAF_END") == 0);
+    CHECK(list.define_values[0] == -27532 && list.define_values[1] == 0x80001004);
+    const char* header_path = "test_natives.h";
+    CHECK(natives_write_header(&list, header_path));
+    char* header = read_text(header_path);
+    CHECK(header && strstr(header, "#define SDA_GLOBAL (-27532)") &&
+          strstr(header, "#define LEAF_END 0x80001004u"));
+    free(header);
+    remove(header_path);
+    natives_free(&list);
+    CHECK(write_text(path, "define 1BAD 4\n"));
+    CHECK(!natives_load(&list, path));
+    CHECK(write_text(path, "define NAME 12x\n"));
+    CHECK(!natives_load(&list, path));
+    CHECK(write_text(path, "80001000 4 B6F2E0C4BC8017BB host_leaf\n"));
+    CHECK(natives_load(&list, path));
+    CHECK(natives_verify(&list, &section, 1));
+    natives_free(&list);
+
     CHECK(write_text(path, "80001000 4 0 a jump\n80001004 4 0 b\n"));
     CHECK(natives_load(&list, path));
     CHECK(list.entries[0].jump && !list.entries[1].jump);
@@ -111,7 +135,10 @@ int main(void) {
     fclose(out);
     text = read_text(out_path);
     CHECK(text);
-    CHECK(strstr(text, "if (host_jump(ctx))\n                    return;"));
+    CHECK(strstr(text, "if (host_jump(ctx)) {\n"
+                       "                    if (ctx->pc == 0x80001004u && dolrecomp_idle_pc != 0x80001004u)\n"
+                       "                        goto label_80001004;\n"
+                       "                    return;"));
     CHECK(strstr(text, "if (host_jump(ctx)) {\n            return;"));
     free(text);
     remove(out_path);

@@ -87,6 +87,32 @@ if(NOT WIN32)
     target_link_libraries(dr_runtime PUBLIC m)
 endif()
 
+# Sources a game's recompiled library compiles next to its generated code,
+# with its flags (so they inline across it under LTO): the glue to the
+# generated tables (dr_guest) and host implementations of SDK functions any
+# game can list in its natives (dr_natives_*). They include ppc_recomp.h and
+# ppc_natives.h, so the game's library puts the output directory on its
+# include path, and link them PRIVATE.
+add_library(dr_guest INTERFACE)
+target_sources(dr_guest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/core/guest_module.c)
+target_link_libraries(dr_guest INTERFACE dr_runtime)
+
+# The Metrowerks runtime and MSL: register save/restore helpers, memcpy.
+add_library(dr_natives_mwcc INTERFACE)
+target_sources(dr_natives_mwcc INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/msl_string.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/mwcc_runtime.c)
+target_link_libraries(dr_natives_mwcc INTERFACE dr_runtime)
+
+# The Revolution SDK's OS (context, interrupts, mutexes), cache and matrix
+# functions; their defines are listed beside each source's natives.
+add_library(dr_natives_rvl INTERFACE)
+target_sources(dr_natives_rvl INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_cache.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_mtx.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_os.c)
+target_link_libraries(dr_natives_rvl INTERFACE dr_runtime)
+
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
     foreach(test natives)

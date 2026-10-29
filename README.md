@@ -23,7 +23,24 @@ part of it; upstream is
 - Paired singles, `psq_l`/`psq_st` and exact floating-point corner cases.
 
 `runtime/core` holds the CPU state, memory helpers and an interpreter that
-runs whatever the recompiled code does not cover.
+runs whatever the recompiled code does not cover, and the glue a host runtime
+uses to find the generated functions (`guest_module.h`). `runtime/sdk` holds
+natives any game can list: the Metrowerks register save/restore helpers and
+`memcpy`, and the Revolution SDK's context, interrupt, mutex, cache and matrix
+functions. What differs between games on the same SDK (where the linker put a
+function or a global, small-data offsets) comes from `define` lines in the
+game's natives list, which the recompiler writes to `ppc_natives.h`.
+
+| Library | What a game's recompiled library gets from it |
+|---|---|
+| `dr_runtime` | CPU state, memory helpers, the interpreter |
+| `dr_guest` | `guest_module.c`, compiled with the generated code |
+| `dr_natives_mwcc` | `_savegpr_N`/`_restgpr_N` and the FPR forms, `memcpy`, `__fill_mem` |
+| `dr_natives_rvl` | `OSSaveContext`/`OSLoadContext`, `OSDisableInterrupts` and friends, `OSLockMutex` and friends, `DC*Range`, `PSMTX*`/`PSVEC*` |
+
+The interface libraries compile their sources inside the game's library with
+its flags, so the natives inline across the generated code as if they were the
+game's own.
 
 ## Use
 
@@ -35,7 +52,12 @@ dolrecomp --setup     # download Wiimms ISO Tools for extract
 
 The config names the DOL, the natives list and the RSO modules with the
 addresses they load at; DualizeRecomp's is
-`DualizeRecompLib/config/R7EE8P.toml`.
+`DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
+`ppc_recomp.h`, `ppc_tables.inc` and `ppc_natives.h`.
+
+`tools/natives_hash.py` prints natives-list entries (address, size, code
+hash) for functions of a DOL; `tools/find_sdk_symbols.py` names a DOL's SDK
+functions from Dolphin's signature database, to find a new game's natives.
 
 ## Build
 

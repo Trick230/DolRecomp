@@ -398,6 +398,10 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
         printf("natives: %u guest functions with host implementations\n", natives.count);
         emit_set_natives(natives.entries, natives.count);
     }
+    char natives_header[1200];
+    if (!join_path(natives_header, sizeof(natives_header), out_dir, "ppc_natives.h") ||
+        !make_dir_tree(out_dir) || !natives_write_header(&natives, natives_header))
+        goto done;
     entries = collect_entry_targets(&dol, sections, section_count, &entry_count);
     if (!entries)
         goto done;
