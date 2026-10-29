@@ -70,10 +70,6 @@ public:
   void Stop() { m_running = false; }
   bool Running() const { return m_running; }
 
-  // Runs the function at address to its return (lr = 0) on the interpreter,
-  // as the HLE boot calls the apploader.
-  void RunFunction(uint32_t address);
-
   // Calls the guest function at address with args in r3.. and runs it to its
   // return, recompiled where possible; returns its r3. Every register comes
   // back as it was, so host code (a native, an OS handler) can call the SDK

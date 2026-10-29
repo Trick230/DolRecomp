@@ -19,6 +19,7 @@ namespace dolrecomp
 {
 namespace
 {
+constexpr uint32_t MSR_IR = 0x20;
 constexpr uint32_t MSR_EE = 0x8000;
 constexpr uint32_t MSR_ILE = 0x10000;
 constexpr uint32_t EXCEPTION_MSR_CLEAR = 0x04EF36;
@@ -858,11 +859,24 @@ void Cpu::RunLoop()
       idled = false;
     while (state.downcount > 0 && m_running)
     {
-      const int function = m_module ? Dispatchable(state.pc) : NO_FUNCTION;
+      const uint32_t pc = state.pc;
+      int function = m_module ? Dispatchable(pc) : NO_FUNCTION;
+      // Code run with translation off (the OS's BAT setup, entered by rfi)
+      // runs as its cached mirror: it branches relative and leaves by rfi.
+      if (function < 0 && m_module && !(state.msr & MSR_IR) && pc < 0x20000000u)
+      {
+        state.pc = pc | 0x80000000u;
+        function = Dispatchable(state.pc);
+        if (function < 0)
+          state.pc = pc;
+      }
       if (function >= 0)
       {
         if (!RunNative(function))
+        {
           ++m_stats.entry_misses;
+          state.pc = pc;
+        }
         else if (m_idle_pc && state.pc == m_idle_pc)
           break;
         else
@@ -873,18 +887,6 @@ void Cpu::RunLoop()
       if (m_idle_pc && state.pc == m_idle_pc)
         break;
     }
-  }
-}
-
-void Cpu::RunFunction(uint32_t address)
-{
-  state.pc = address;
-  state.lr = 0;
-  while (state.pc != 0)
-  {
-    Charge(Step());
-    if (state.downcount <= 0)
-      m_scheduler.Advance();
   }
 }
 

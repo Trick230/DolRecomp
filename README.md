@@ -57,7 +57,8 @@ compiled into the host executable):
   (`interpreter.cpp`, with the generated code's semantics and cycle costs)
   everywhere else. It owns the SPRs, timebase and decrementer, the gather
   pipe, the locked L1 cache and its DMA, and safepoints that run due events
-  inside generated loops.
+  inside generated loops. Code run with translation off (the OS's BAT setup)
+  runs as its cached mirror's generated code.
 - Self-modifying code: a function whose bytes no longer match its hash runs
   on the interpreter; one that matches again returns to generated code. An
   invalidation that retires code the guest has run leaves every caller to the
