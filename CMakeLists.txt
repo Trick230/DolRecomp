@@ -60,12 +60,29 @@ endif()
 add_library(tomlc99 STATIC thirdparty/tomlc99/toml.c)
 target_include_directories(tomlc99 PUBLIC thirdparty/tomlc99)
 
+# The signatures of the natives below (runtime/sdk/<set>.sigs), built into the
+# recompiler: a game's config lists them as natives = ["@<set>", ...].
+set(DOLRECOMP_SIGNATURE_SETS mwcc rvl)
+set(DOLRECOMP_SIGNATURE_FILES)
+foreach(set IN LISTS DOLRECOMP_SIGNATURE_SETS)
+    list(APPEND DOLRECOMP_SIGNATURE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/${set}.sigs")
+endforeach()
+set(DOLRECOMP_BUILTIN_SIGNATURES "${CMAKE_CURRENT_BINARY_DIR}/builtin_signatures.c")
+add_custom_command(
+    OUTPUT "${DOLRECOMP_BUILTIN_SIGNATURES}"
+    COMMAND ${CMAKE_COMMAND} "-DOUT=${DOLRECOMP_BUILTIN_SIGNATURES}"
+        "-DDIR=${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk" "-DSETS=${DOLRECOMP_SIGNATURE_SETS}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_signatures.cmake"
+    DEPENDS ${DOLRECOMP_SIGNATURE_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_signatures.cmake"
+    VERBATIM)
+
 add_library(dr_app STATIC
     src/app/config.c
     src/app/natives.c
     src/app/recompile.c
     src/app/rso_link.c
-    src/app/setup.c)
+    src/app/setup.c
+    "${DOLRECOMP_BUILTIN_SIGNATURES}")
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_app PUBLIC dr_backend tomlc99)
 

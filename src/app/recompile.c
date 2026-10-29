@@ -389,18 +389,25 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
 
     int ok = 0;
     DolRecompNativeList natives = {0};
+    NativeSignatures signatures = {0};
     u32 entry_count = 0;
     u32* entries = NULL;
-    if (config->natives[0]) {
-        if (!natives_load(&natives, config->natives) ||
-            !natives_verify(&natives, sections, section_count))
+    for (u32 i = 0; i < config->natives_count; i++) {
+        if (!natives_load(&signatures, config->natives[i]))
             goto done;
-        printf("natives: %u guest functions with host implementations\n", natives.count);
-        emit_set_natives(natives.entries, natives.count);
     }
+    if (!natives_resolve(&natives, &signatures, sections, section_count))
+        goto done;
+    if (signatures.count)
+        printf("natives: %u guest functions with host implementations, of %u signatures\n",
+               natives.count, signatures.count);
+    emit_set_natives(natives.entries, natives.count);
     char natives_header[1200];
+    char natives_list[1200];
     if (!join_path(natives_header, sizeof(natives_header), out_dir, "ppc_natives.h") ||
-        !make_dir_tree(out_dir) || !natives_write_header(&natives, natives_header))
+        !join_path(natives_list, sizeof(natives_list), out_dir, "natives.txt") ||
+        !make_dir_tree(out_dir) || !natives_write_header(&natives, natives_header) ||
+        !natives_write_list(&natives, natives_list))
         goto done;
     entries = collect_entry_targets(&dol, sections, section_count, &entry_count);
     if (!entries)
@@ -420,6 +427,7 @@ done:
     emit_set_natives(NULL, 0);
     free(entries);
     natives_free(&natives);
+    natives_signatures_free(&signatures);
     rso_link_free(&rso);
     dol_free(&dol);
     return ok;

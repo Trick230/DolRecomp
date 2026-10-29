@@ -95,19 +95,29 @@ int config_load(RecompConfig* config, const char* path) {
         goto done;
 
     if (toml_key_exists(main, "natives")) {
-        // Relative to the config file.
-        char natives[512];
-        if (!copy_string(natives, sizeof(natives), toml_string_in(main, "natives"), "main.natives"))
+        const toml_array_t* natives = toml_array_in(main, "natives");
+        const int count = natives ? toml_array_nelem(natives) : -1;
+        if (count < 0 || (u32)count > RECOMP_MAX_NATIVES_FILES) {
+            fprintf(stderr, "error: config main.natives needs a list of up to %u signature files\n",
+                    RECOMP_MAX_NATIVES_FILES);
             goto done;
+        }
+        // Files relative to the config file; "@name" as is.
         const char* slash = strrchr(path, '/');
         const char* backslash = strrchr(path, '\\');
         if (backslash > slash)
             slash = backslash;
         const int dir = slash ? (int)(slash - path + 1) : 0;
-        if (snprintf(config->natives, sizeof(config->natives), "%.*s%s", dir, path, natives) >=
-            (int)sizeof(config->natives)) {
-            fprintf(stderr, "error: natives path is too long\n");
-            goto done;
+        for (int i = 0; i < count; i++) {
+            char file[512];
+            if (!copy_string(file, sizeof(file), toml_string_at(natives, i), "main.natives"))
+                goto done;
+            char* out = config->natives[config->natives_count++];
+            if (snprintf(out, sizeof(config->natives[0]), "%.*s%s", file[0] == '@' ? 0 : dir, path,
+                         file) >= (int)sizeof(config->natives[0])) {
+                fprintf(stderr, "error: natives path is too long\n");
+                goto done;
+            }
         }
     }
 

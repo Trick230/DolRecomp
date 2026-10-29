@@ -4,11 +4,12 @@
 #include "common/types.h"
 
 // A game's recompilation, as one TOML file. Paths in [main] and [rso] are
-// relative to the game's extracted disc, the natives list to the config file.
+// relative to the game's extracted disc, natives' files to the config file
+// ("@name" is a signature set built into DolRecomp, see app/natives.h).
 //
 //   [main]
 //   dol = "sys/main.dol"
-//   natives = "R7EE8P.natives"
+//   natives = ["@mwcc", "@rvl", "sdk.sigs"]
 //   shards = 64
 //
 //   [rso]
@@ -18,6 +19,7 @@
 
 #define RECOMP_MAX_STATIC_SECTIONS 32u
 #define RECOMP_MAX_RSO_MODULES 32u
+#define RECOMP_MAX_NATIVES_FILES 16u
 
 typedef struct {
     char file[512];
@@ -27,7 +29,8 @@ typedef struct {
 
 typedef struct {
     char dol[512];
-    char natives[1024];  // empty for none
+    char natives[RECOMP_MAX_NATIVES_FILES][1024];
+    u32 natives_count;
     u32 shards;
 
     char sel[512];  // empty without [rso]

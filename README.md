@@ -17,9 +17,10 @@ part of it; upstream is
   active; anything else returns to the runtime's dispatcher with `ctx->pc`.
 - Cycle counts per block against `ctx->downcount`, with safepoints on loop
   back-edges and dispatch so the runtime can run timers and interrupts.
-- Natives: SDK functions the runtime implements on the host, each pinned to
-  the guest bytes it replaces by an FNV-1a hash, so a different build of the
-  function stays recompiled.
+- Natives: SDK functions the runtime implements on the host, found by
+  signature: their code with what the linker decides masked (calls out,
+  `lis` halves, small-data offsets). Struct offsets stay, so a different build
+  of the function stays recompiled.
 - Paired singles, `psq_l`/`psq_st` and exact floating-point corner cases.
 
 `runtime/core` holds the CPU state, memory helpers and an interpreter that
@@ -27,9 +28,11 @@ runs whatever the recompiled code does not cover, and the glue a host runtime
 uses to find the generated functions (`guest_module.h`). `runtime/sdk` holds
 natives any game can list: the Metrowerks register save/restore helpers and
 `memcpy`, and the Revolution SDK's context, interrupt, mutex, cache and matrix
-functions. What differs between games on the same SDK (where the linker put a
-function or a global, small-data offsets) comes from `define` lines in the
-game's natives list, which the recompiler writes to `ppc_natives.h`.
+functions, with their signatures (`mwcc.sigs`, `rvl.sigs`, built into the
+recompiler as `@mwcc` and `@rvl`). What differs between games on the same SDK
+(where the linker put a function or a global, small-data offsets) is read off
+the matched code by `define` lines there, which the recompiler writes to
+`ppc_natives.h`. The format is in `src/app/natives.h`.
 
 | Library | What a game's recompiled library gets from it |
 |---|---|
@@ -79,14 +82,15 @@ dolrecomp extract <iso> <output dir>
 dolrecomp --setup     # download Wiimms ISO Tools for extract
 ```
 
-The config names the DOL, the natives list and the RSO modules with the
-addresses they load at; DualizeRecomp's is
+The config names the DOL, the natives' signature sets and the RSO modules
+with the addresses they load at; DualizeRecomp's is
 `DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
-`ppc_recomp.h`, `ppc_tables.inc` and `ppc_natives.h`.
+`ppc_recomp.h`, `ppc_tables.inc`, `ppc_natives.h` and `natives.txt` (what the
+signatures found).
 
-`tools/natives_hash.py` prints natives-list entries (address, size, code
-hash) for functions of a DOL; `tools/find_sdk_symbols.py` names a DOL's SDK
-functions from Dolphin's signature database, to find a new game's natives.
+`dolrecomp sign <main.dol> <address> <size>` prints a new native's signature
+fields; `tools/find_sdk_symbols.py` names a DOL's SDK functions from Dolphin's
+signature database, to find where a game's SDK functions are.
 
 ## Build
 
