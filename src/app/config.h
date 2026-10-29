@@ -5,11 +5,11 @@
 
 // A game's recompilation, as one TOML file. Paths in [main], [rso] and [rel]
 // are relative to the game's extracted disc, natives' files to the config file
-// ("@name" is a signature set built into DolRecomp, see app/natives.h).
+// (see app/natives.h: the game's runtime implements what they name).
 //
 //   [main]
 //   dol = "sys/main.dol"
-//   natives = ["@mwcc", "@rvl", "sdk.sigs"]
+//   natives = ["mwcc.sigs", "rvl.sigs", "sdk.sigs"]
 //   shards = 64
 //
 //   [rso]

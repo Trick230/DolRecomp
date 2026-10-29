@@ -60,22 +60,6 @@ endif()
 add_library(tomlc99 STATIC thirdparty/tomlc99/toml.c)
 target_include_directories(tomlc99 PUBLIC thirdparty/tomlc99)
 
-# The signatures of the natives below (runtime/sdk/<set>.sigs), built into the
-# recompiler: a game's config lists them as natives = ["@<set>", ...].
-set(DOLRECOMP_SIGNATURE_SETS mwcc rvl)
-set(DOLRECOMP_SIGNATURE_FILES)
-foreach(set IN LISTS DOLRECOMP_SIGNATURE_SETS)
-    list(APPEND DOLRECOMP_SIGNATURE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/${set}.sigs")
-endforeach()
-set(DOLRECOMP_BUILTIN_SIGNATURES "${CMAKE_CURRENT_BINARY_DIR}/builtin_signatures.c")
-add_custom_command(
-    OUTPUT "${DOLRECOMP_BUILTIN_SIGNATURES}"
-    COMMAND ${CMAKE_COMMAND} "-DOUT=${DOLRECOMP_BUILTIN_SIGNATURES}"
-        "-DDIR=${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk" "-DSETS=${DOLRECOMP_SIGNATURE_SETS}"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_signatures.cmake"
-    DEPENDS ${DOLRECOMP_SIGNATURE_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_signatures.cmake"
-    VERBATIM)
-
 add_library(dr_app STATIC
     src/app/config.c
     src/app/module_link.c
@@ -83,68 +67,37 @@ add_library(dr_app STATIC
     src/app/recompile.c
     src/app/rel_link.c
     src/app/rso_link.c
-    src/app/setup.c
-    "${DOLRECOMP_BUILTIN_SIGNATURES}")
+    src/app/setup.c)
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_app PUBLIC dr_backend tomlc99)
 
 add_executable(dolrecomp src/app/main.c)
 target_link_libraries(dolrecomp PRIVATE dr_app)
 
-# The guest CPU the generated code runs on: CPUState, memory access, the
-# bit-exact Broadway floating point and paired singles, and an interpreter
-# for code the recompiler does not cover.
-add_library(dr_runtime STATIC
-    runtime/core/cpu.c
-    runtime/core/cpu_exception.c
-    runtime/core/cpu_interpreter.c
-    runtime/core/cpu_interpreter_float.c
-    runtime/core/cpu_interpreter_integer.c
-    runtime/core/cpu_interpreter_table.c)
-target_include_directories(dr_runtime PUBLIC runtime)
+# What the generated code runs on, the recompiler's side of a game's runtime:
+# CPUState and its memory access, the bit-exact Broadway floating point and
+# paired singles, exceptions, and the instructions it calls out for. The game
+# links it and supplies the rest: memory, the dispatcher behind
+# dolrecomp_lookup and dolrecomp_safepoint, and the hooks in CPUState.
+add_library(dr_core STATIC
+    core/cpu.c
+    core/cpu_exception.c
+    core/cpu_interpreter.c
+    core/cpu_interpreter_float.c
+    core/cpu_interpreter_integer.c
+    core/cpu_interpreter_table.c)
+target_include_directories(dr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(NOT WIN32)
-    target_link_libraries(dr_runtime PUBLIC m)
+    target_link_libraries(dr_core PUBLIC m)
 endif()
 
-# Sources a game's recompiled library compiles next to its generated code,
-# with its flags (so they inline across it under LTO): the glue to the
-# generated tables (dr_guest) and host implementations of SDK functions any
-# game can list in its natives (dr_natives_*). They include ppc_recomp.h and
-# ppc_natives.h, so the game's library puts the output directory on its
-# include path, and link them PRIVATE.
+# The glue to the generated tables (core/guest_module.h), which the game's
+# recompiled library compiles next to its generated code with its flags: it
+# includes ppc_recomp.h, so that library puts the output directory on its
+# include path and links this PRIVATE.
 add_library(dr_guest INTERFACE)
-target_sources(dr_guest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/core/guest_module.c)
-target_link_libraries(dr_guest INTERFACE dr_runtime)
-
-# The Metrowerks runtime and MSL: register save/restore helpers, memcpy.
-add_library(dr_natives_mwcc INTERFACE)
-target_sources(dr_natives_mwcc INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/msl_string.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/mwcc_runtime.c)
-target_link_libraries(dr_natives_mwcc INTERFACE dr_runtime)
-
-# The Revolution SDK's OS (context, interrupts, mutexes), cache and matrix
-# functions; their defines are listed beside each source's natives.
-add_library(dr_natives_rvl INTERFACE)
-target_sources(dr_natives_rvl INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_cache.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_mtx.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/sdk/rvl_os.c)
-target_link_libraries(dr_natives_rvl INTERFACE dr_runtime)
-
-# The host runtime's CPU layer (C++20), compiled into the host executable with
-# its flags: the dispatcher over the generated functions with the interpreter
-# beside it, guest calls, guest threads on fibers, the event scheduler, guest
-# memory and the savestate stream. The host derives its machine from
-# dolrecomp::CpuHost (runtime/host/cpu.hpp) and defines its members. A
-# GameCube host defines DOLRECOMP_GAMECUBE (no MEM2, Gekko's clock).
-add_library(dr_host INTERFACE)
-target_sources(dr_host INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/cpu.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/interpreter.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/memory.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/host/scheduler.cpp)
-target_link_libraries(dr_host INTERFACE dr_runtime)
+target_sources(dr_guest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/core/guest_module.c)
+target_link_libraries(dr_guest INTERFACE dr_core)
 
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
@@ -163,13 +116,6 @@ if(DOLRECOMP_BUILD_TESTS)
         target_link_libraries(test_${test} PRIVATE dr_backend)
         add_test(NAME ${test} COMMAND test_${test})
     endforeach()
-
-    # The CPU layer over a hand-made module: picking among overlapping groups.
-    enable_language(CXX)
-    add_executable(test_overlay_dispatch tests/test_overlay_dispatch.cpp)
-    target_link_libraries(test_overlay_dispatch PRIVATE dr_host)
-    target_compile_features(test_overlay_dispatch PRIVATE cxx_std_20)
-    add_test(NAME overlay_dispatch COMMAND test_overlay_dispatch)
 
     add_executable(test_symbols tests/test_symbols.c)
     target_link_libraries(test_symbols PRIVATE dr_backend)

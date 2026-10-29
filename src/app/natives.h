@@ -67,8 +67,7 @@ typedef struct {
 
 // Appends the signatures in text (origin names it in errors).
 int natives_parse(NativeSignatures* signatures, const char* text, const char* origin);
-// Appends a .sigs file, or "@name": a set built into DolRecomp, beside the
-// natives it implements (runtime/sdk/<name>.sigs).
+// Appends a .sigs file.
 int natives_load(NativeSignatures* signatures, const char* path);
 void natives_signatures_free(NativeSignatures* signatures);
 
@@ -84,8 +83,5 @@ int natives_write_list(const DolRecompNativeList* list, const char* path);
 // Writes the defines as a C header (an empty one without any).
 int natives_write_header(const DolRecompNativeList* list, const char* path);
 void natives_free(DolRecompNativeList* list);
-
-// Built into the recompiler (builtin_signatures.c, generated).
-const char* natives_builtin_signatures(const char* name);
 
 #endif

@@ -211,14 +211,6 @@ out_of_memory:
 }
 
 int natives_load(NativeSignatures* signatures, const char* path) {
-    if (path[0] == '@') {
-        const char* text = natives_builtin_signatures(path + 1);
-        if (!text) {
-            fprintf(stderr, "error: DolRecomp has no signature set %s\n", path);
-            return 0;
-        }
-        return natives_parse(signatures, text, path);
-    }
     FILE* file = fopen(path, "rb");
     if (!file) {
         fprintf(stderr, "error: cannot open signatures %s\n", path);
