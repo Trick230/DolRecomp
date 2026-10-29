@@ -148,7 +148,7 @@ target_link_libraries(dr_host INTERFACE dr_runtime)
 
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
-    foreach(test natives rel_link)
+    foreach(test natives rel_link rso_link)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE dr_app)
         add_test(NAME ${test} COMMAND test_${test})
@@ -163,6 +163,13 @@ if(DOLRECOMP_BUILD_TESTS)
         target_link_libraries(test_${test} PRIVATE dr_backend)
         add_test(NAME ${test} COMMAND test_${test})
     endforeach()
+
+    # The CPU layer over a hand-made module: picking among overlapping groups.
+    enable_language(CXX)
+    add_executable(test_overlay_dispatch tests/test_overlay_dispatch.cpp)
+    target_link_libraries(test_overlay_dispatch PRIVATE dr_host)
+    target_compile_features(test_overlay_dispatch PRIVATE cxx_std_20)
+    add_test(NAME overlay_dispatch COMMAND test_overlay_dispatch)
 
     add_executable(test_symbols tests/test_symbols.c)
     target_link_libraries(test_symbols PRIVATE dr_backend)

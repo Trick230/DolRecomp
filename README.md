@@ -85,6 +85,7 @@ events and before idling); they bind at link time. A GameCube host defines
 ```sh
 dolrecomp <config.toml> <extracted game> <output dir>
 dolrecomp extract <iso> <output dir>
+dolrecomp rso-find <config.toml> <extracted game> <mem1 dump> [mem2 dump]
 dolrecomp --setup     # download Wiimms ISO Tools for extract
 ```
 
@@ -97,11 +98,17 @@ RSO overlays (`[rso] overlays`) are modules the game loads at times into
 memory other code uses at other times, like one stage after another: each
 links against the resident modules alone and gets functions of its own
 (`func_<module>_<address>`) next to the ones it overlaps; the runtime runs, of
-the functions over a pc, the one whose hash matches guest RAM;
+the functions over a pc, the one whose hash matches guest RAM. An overlay
+can leave its address to `overlay_heap_top`: the SDK's expanded heap hands
+out its file and bss from the tail of the free space ending there.
 `src/app/config.h` shows the format. DualizeRecomp's is
 `DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
 `ppc_recomp.h`, `ppc_tables.inc`, `ppc_natives.h` and `natives.txt` (what the
 signatures found).
+
+`dolrecomp rso-find` reads where the config's RSO modules are loaded in a
+RAM dump (MEM1 and MEM2 as Dolphin dumps them) and prints their config lines,
+checked against the config, with the heap top an overlay implies.
 
 `dolrecomp sign <main.dol> <address> <size>` prints a new native's signature
 fields; `tools/find_sdk_symbols.py` names a DOL's SDK functions from Dolphin's

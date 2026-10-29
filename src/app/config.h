@@ -16,7 +16,8 @@
 //   sel = "files/rso/NightsWii.sel"
 //   static_sections = [0, 0x80004000, ...]
 //   modules = [{ file = "files/rso/global.rso", base = 0x8106E4C0, bss = 0x812C7F80 }, ...]
-//   overlays = [{ file = "files/rso/stage1000.rso", base = 0x8176D320, bss = 0x8176D280 }, ...]
+//   overlay_heap_top = 0x81796040
+//   overlays = [{ file = "files/rso/stage1000.rso" }, ...]
 //
 //   [rel]
 //   modules = [{ file = "files/stage.rel", base = 0x80400000, bss = 0x80480000 }, ...]
@@ -24,7 +25,12 @@
 // A module's base is where the game loads its file, its bss what the game
 // hands the linker for the bss (needed only when the module has one).
 // Overlays are RSO modules loaded at times into memory others use (see
-// app/module_link.h): each links against the resident modules alone.
+// app/module_link.h): each links against the resident modules alone. With
+// overlay_heap_top, an overlay with no base is placed as the SDK's expanded
+// heap hands out the file and then the bss from the tail of free space ending
+// there (32-byte aligned, a 0x10-byte block header below each): base = top -
+// round32(file size), bss = base - round32(bss size + 0x10). `dolrecomp
+// rso-find` reads where modules really loaded from a RAM dump.
 
 #define RECOMP_MAX_STATIC_SECTIONS 32u
 #define RECOMP_MAX_MODULES 32u
@@ -49,6 +55,7 @@ typedef struct {
     u32 rso_module_count;
     RecompModule rso_overlays[RECOMP_MAX_MODULES];
     u32 rso_overlay_count;
+    u32 rso_overlay_heap_top;  // 0 when not given
 
     RecompModule rel_modules[RECOMP_MAX_MODULES];  // [rel]
     u32 rel_module_count;

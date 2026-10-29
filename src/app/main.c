@@ -1,4 +1,5 @@
 #include "app/config.h"
+#include "app/module_link.h"
 #include "app/natives.h"
 #include "app/recompile.h"
 #include "app/setup.h"
@@ -14,6 +15,8 @@ static void usage(void) {
            "       dolrecomp extract <iso> <output dir>\n"
            "       dolrecomp sign <main.dol> <address> <size> ...\n"
            "                    natives' signature fields for the code there\n"
+           "       dolrecomp rso-find <config.toml> <extracted game> <mem1 dump> [mem2 dump]\n"
+           "                    where the config's RSO modules are loaded in a RAM dump\n"
            "       dolrecomp --setup    download Wiimms ISO Tools for extract\n");
 }
 
@@ -52,11 +55,52 @@ static int sign(int argc, char** argv) {
     return ok ? 0 : 1;
 }
 
+static u8* read_dump(const char* path, u32* size) {
+    FILE* file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "error: can't open %s\n", path);
+        return NULL;
+    }
+    fseek(file, 0, SEEK_END);
+    const long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    u8* bytes = length > 0 ? (u8*)malloc((size_t)length) : NULL;
+    if (bytes && fread(bytes, 1, (size_t)length, file) != (size_t)length) {
+        free(bytes);
+        bytes = NULL;
+    }
+    fclose(file);
+    if (!bytes)
+        fprintf(stderr, "error: can't read %s\n", path);
+    *size = (u32)length;
+    return bytes;
+}
+
+static int rso_find_main(int argc, char** argv) {
+    if (argc != 4 && argc != 5) {
+        usage();
+        return 1;
+    }
+    RecompConfig config;
+    if (!config_load(&config, argv[1]))
+        return 1;
+    u32 mem1_size = 0, mem2_size = 0;
+    u8* mem1 = read_dump(argv[3], &mem1_size);
+    u8* mem2 = argc == 5 ? read_dump(argv[4], &mem2_size) : NULL;
+    const int ok = mem1 && (argc == 4 || mem2) &&
+                   rso_find(&config, argv[2], mem1, mem1_size, mem2, mem2_size);
+    free(mem1);
+    free(mem2);
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "extract") == 0)
         return disc_extract_main(argc - 1, argv + 1);
     if (argc > 1 && strcmp(argv[1], "sign") == 0)
         return sign(argc - 1, argv + 1);
+    if (argc > 1 && strcmp(argv[1], "rso-find") == 0)
+        return rso_find_main(argc - 1, argv + 1);
     if (argc == 2 && strcmp(argv[1], "--setup") == 0)
         return run_setup() ? 0 : 1;
     if (argc != 4) {

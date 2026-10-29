@@ -29,9 +29,10 @@ static int read_u32(toml_datum_t value, u32* out, const char* key) {
     return 1;
 }
 
-// A table's `<list> = [{ file, base, bss }, ...]`.
+// A table's `<list> = [{ file, base, bss }, ...]`; base may be left out where
+// the modules have a placement rule.
 static int load_modules(const toml_table_t* table, const char* name, const char* list,
-                        RecompModule* out, u32* count) {
+                        bool placed_by_rule, RecompModule* out, u32* count) {
     char key[64];
     const toml_array_t* modules = toml_array_in(table, list);
     const int module_count = modules ? toml_array_nelem(modules) : -1;
@@ -47,8 +48,10 @@ static int load_modules(const toml_table_t* table, const char* name, const char*
         snprintf(key, sizeof(key), "%s.%s.file", name, list);
         if (!copy_string(module->file, sizeof(module->file), toml_string_in(entry, "file"), key))
             return 0;
+        module->base = 0;
         snprintf(key, sizeof(key), "%s.%s.base", name, list);
-        if (!read_u32(toml_int_in(entry, "base"), &module->base, key))
+        if ((!placed_by_rule || toml_key_exists(entry, "base")) &&
+            !read_u32(toml_int_in(entry, "base"), &module->base, key))
             return 0;
         module->bss = 0;
         snprintf(key, sizeof(key), "%s.%s.bss", name, list);
@@ -76,9 +79,13 @@ static int load_rso(RecompConfig* config, const toml_table_t* rso) {
             return 0;
     }
     config->static_section_count = (u32)section_count;
-    return load_modules(rso, "rso", "modules", config->rso_modules, &config->rso_module_count) &&
+    const bool heap = toml_key_exists(rso, "overlay_heap_top");
+    if (heap && !read_u32(toml_int_in(rso, "overlay_heap_top"), &config->rso_overlay_heap_top,
+                          "rso.overlay_heap_top"))
+        return 0;
+    return load_modules(rso, "rso", "modules", false, config->rso_modules, &config->rso_module_count) &&
            (!toml_key_exists(rso, "overlays") ||
-            load_modules(rso, "rso", "overlays", config->rso_overlays, &config->rso_overlay_count));
+            load_modules(rso, "rso", "overlays", heap, config->rso_overlays, &config->rso_overlay_count));
 }
 
 int config_load(RecompConfig* config, const char* path) {
@@ -143,7 +150,7 @@ int config_load(RecompConfig* config, const char* path) {
     const toml_table_t* rso = toml_table_in(root, "rso");
     const toml_table_t* rel = toml_table_in(root, "rel");
     ok = (!rso || load_rso(config, rso)) &&
-         (!rel || load_modules(rel, "rel", "modules", config->rel_modules, &config->rel_module_count));
+         (!rel || load_modules(rel, "rel", "modules", false, config->rel_modules, &config->rel_module_count));
 
 done:
     toml_free(root);

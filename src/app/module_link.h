@@ -41,6 +41,16 @@ typedef struct {
 int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir);
 int rel_link(ModuleLink* link, const RecompConfig* config, const char* game_dir);
 
+// Prints where each of the config's RSO modules is loaded in a dump of guest
+// RAM (MEM1 at 0x80000000, MEM2 at 0x90000000 or NULL), as config lines
+// checked against the config.
+int rso_find(const RecompConfig* config, const char* game_dir, const u8* mem1, u32 mem1_size,
+             const u8* mem2, u32 mem2_size);
+// Where one RSO module is loaded in such a dump: 1 found, 0 not loaded, -1
+// the module can't be read.
+int rso_locate(const char* game_dir, const char* file, const u8* mem1, u32 mem1_size, const u8* mem2,
+               u32 mem2_size, u32* base, u32* bss);
+
 int module_link_add_section(ModuleLink* link, u32 group, bool code, const char* module,
                             u32 address, const u8* bytes, u32 size);
 int module_link_add_entry(ModuleLink* link, u32 group, u32 address);

@@ -25,6 +25,7 @@ typedef struct {
 // The RSO header fields the linker needs (layout as in Dolphin's RSOView).
 typedef struct {
     u32 section_count, section_table;
+    u32 name, bss_size;
     u8 prolog_section, epilog_section, unresolved_section;
     u32 unresolved_offset;
     u32 internals, internals_size, externals, externals_size;
@@ -35,6 +36,7 @@ typedef struct {
 typedef struct {
     Bytes file;
     RsoHeader header;
+    u32 base, bss;  // where it loads
     u32* section_address;
 } Module;
 
@@ -78,6 +80,8 @@ static int parse_header(const Bytes* f, RsoHeader* h) {
     const u8* d = f->data;
     h->section_count = read_be32(d + 0x08);
     h->section_table = read_be32(d + 0x0C);
+    h->name = read_be32(d + 0x10);
+    h->bss_size = read_be32(d + 0x1C);
     h->prolog_section = d[0x20];
     h->epilog_section = d[0x21];
     h->unresolved_section = d[0x22];
@@ -169,11 +173,35 @@ static void free_module(Module* module) {
     memset(module, 0, sizeof(*module));
 }
 
-// Reads a module and places its sections where the config says it loads.
-static int place_module(Module* module, const RecompModule* placed, const char* game_dir) {
-    if (!read_file(game_dir, placed->file, &module->file) ||
-        !parse_header(&module->file, &module->header)) {
-        fprintf(stderr, "error: can't read RSO module %s\n", placed->file);
+static u32 round32(u32 size) {
+    return (size + 31u) & ~31u;
+}
+
+static int load_module(Module* module, const char* file, const char* game_dir) {
+    if (read_file(game_dir, file, &module->file) && parse_header(&module->file, &module->header))
+        return 1;
+    fprintf(stderr, "error: can't read RSO module %s\n", file);
+    return 0;
+}
+
+// Where a module the config gives no base loads (see app/config.h): the file,
+// then the bss, from the tail of the expanded heap's free space ending at top.
+static void place_on_heap(Module* module, u32 top) {
+    module->base = top - round32(module->file.size);
+    module->bss = module->header.bss_size ? module->base - round32(module->header.bss_size + 0x10u) : 0;
+}
+
+// Reads a module and places its sections where the config, or with no base
+// there the heap rule, says it loads.
+static int place_module(Module* module, const RecompModule* placed, u32 heap_top, const char* game_dir) {
+    if (!load_module(module, placed->file, game_dir))
+        return 0;
+    module->base = placed->base;
+    module->bss = placed->bss;
+    if (placed->base == 0 && heap_top)
+        place_on_heap(module, heap_top);
+    if (module->base == 0) {
+        fprintf(stderr, "error: %s needs a base in the config\n", placed->file);
         return 0;
     }
     const RsoHeader* h = &module->header;
@@ -185,14 +213,14 @@ static int place_module(Module* module, const RecompModule* placed, const char* 
         const u32 offset = read_be32(table) & ~1u;
         const u32 size = read_be32(table + 4);
         if (offset != 0) {
-            module->section_address[i] = placed->base + offset;
+            module->section_address[i] = module->base + offset;
         } else if (size != 0) {
-            if (placed->bss == 0) {
+            if (module->bss == 0) {
                 fprintf(stderr, "error: %s has a bss section; give its address in the config\n",
                         placed->file);
                 return 0;
             }
-            module->section_address[i] = placed->bss;
+            module->section_address[i] = module->bss;
         }
     }
     return 1;
@@ -255,7 +283,7 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         relocated = section < h->section_count &&
                     relocate(image, file->size, offset, (u8)info,
                              module->section_address[section] + read_be32(entry + 8),
-                             placed->base + offset);
+                             module->base + offset);
     }
     // Imports nothing exports stay bound to the module's unresolved stub,
     // which is also what the game's linker leaves them pointing at.
@@ -279,7 +307,7 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         missing += found == NULL;
         relocated = relocate(image, file->size, offset, (u8)info,
                              (found ? found->address : unresolved) + read_be32(entry + 8),
-                             placed->base + offset);
+                             module->base + offset);
     }
     if (!relocated) {
         fprintf(stderr, "error: %s: malformed or unsupported relocation\n", placed->file);
@@ -297,11 +325,11 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
             continue;
         const bool code = index == h->prolog_section || index == h->epilog_section ||
                           index == h->unresolved_section;
-        ok = module_link_add_section(link, group, code, placed->file, placed->base + offset,
+        ok = module_link_add_section(link, group, code, placed->file, module->base + offset,
                                      image + offset, size);
     }
     if (ok)
-        printf("linked %s at 0x%08X (%u unresolved imports)%s\n", placed->file, placed->base, missing,
+        printf("linked %s at 0x%08X (%u unresolved imports)%s\n", placed->file, module->base, missing,
                group ? " as an overlay" : "");
     free(image);
     return ok;
@@ -339,7 +367,7 @@ int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
         }
     }
     for (u32 m = 0; m < module_count; m++) {
-        if (!place_module(&modules[m], &config->rso_modules[m], game_dir) ||
+        if (!place_module(&modules[m], &config->rso_modules[m], 0, game_dir) ||
             !visit_exports(&modules[m], add_to_exports, &exports))
             goto done;
     }
@@ -365,9 +393,10 @@ int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
     // them when it loads; its own exports are where other code enters it.
     for (u32 k = 0; k < config->rso_overlay_count; k++) {
         EntryList entries = {link, k + 1u};
-        const int linked = place_module(&overlay, &config->rso_overlays[k], game_dir) &&
+        const RecompModule* placed = &config->rso_overlays[k];
+        const int linked = place_module(&overlay, placed, config->rso_overlay_heap_top, game_dir) &&
                            visit_exports(&overlay, add_to_entries, &entries) &&
-                           link_module(link, k + 1u, &config->rso_overlays[k], &overlay, &exports);
+                           link_module(link, k + 1u, placed, &overlay, &exports);
         free_module(&overlay);
         if (!linked)
             goto done;
@@ -382,4 +411,104 @@ done:
     free_module(&overlay);
     free(sel.data);
     return ok;
+}
+
+// A dumped region of guest RAM.
+typedef struct {
+    const u8* bytes;
+    u32 size;
+    u32 address;
+} RamRegion;
+
+static const u8* ram_at(const RamRegion* ram, u32 count, u32 address, u32 size) {
+    for (u32 i = 0; i < count; i++) {
+        if (address - ram[i].address < ram[i].size && size <= ram[i].size - (address - ram[i].address))
+            return ram[i].bytes + (address - ram[i].address);
+    }
+    return NULL;
+}
+
+// A linked module's header in RAM holds its own section table and name as
+// addresses, so the header is where both point back from. Its bss is the one
+// address-only entry of that table.
+static int find_loaded(const Module* module, const RamRegion* ram, u32 count, u32* base, u32* bss) {
+    const RsoHeader* h = &module->header;
+    for (u32 r = 0; r < count; r++) {
+        for (u32 offset = 0; offset + 0x58u <= ram[r].size; offset += 4u) {
+            const u8* header = ram[r].bytes + offset;
+            const u32 address = ram[r].address + offset;
+            if (read_be32(header + 0x08) != h->section_count ||
+                read_be32(header + 0x0C) != address + h->section_table ||
+                (h->name && read_be32(header + 0x10) != address + h->name))
+                continue;
+            const u8* table = ram_at(ram, count, address + h->section_table, h->section_count * 8u);
+            if (!table)
+                continue;
+            *base = address;
+            *bss = 0;
+            for (u32 i = 0; i < h->section_count; i++) {
+                const u8* entry = module->file.data + h->section_table + i * 8u;
+                if (read_be32(entry) == 0 && read_be32(entry + 4) != 0)
+                    *bss = read_be32(table + i * 8u);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void report(const RecompModule* placed, const Module* module, const RamRegion* ram, u32 count,
+                   u32 heap_top, int overlay) {
+    u32 base, bss;
+    if (!find_loaded(module, ram, count, &base, &bss)) {
+        printf("# %s: not loaded\n", placed->file);
+        return;
+    }
+    printf("{ file = \"%s\", base = 0x%08X", placed->file, base);
+    if (bss)
+        printf(", bss = 0x%08X", bss);
+    printf(" },");
+    Module expected = *module;
+    expected.base = placed->base;
+    expected.bss = placed->bss;
+    if (placed->base == 0 && heap_top)
+        place_on_heap(&expected, heap_top);
+    if (expected.base == base && expected.bss == bss)
+        printf("  # as configured");
+    else
+        printf("  # config: 0x%08X, bss 0x%08X", expected.base, expected.bss);
+    if (overlay)
+        printf(", heap top 0x%08X", base + round32(module->file.size));
+    printf("\n");
+}
+
+int rso_find(const RecompConfig* config, const char* game_dir, const u8* mem1, u32 mem1_size,
+             const u8* mem2, u32 mem2_size) {
+    const RamRegion ram[] = {{mem1, mem1_size, 0x80000000u}, {mem2, mem2_size, 0x90000000u}};
+    const u32 count = mem2 ? 2u : 1u;
+    const u32 total = config->rso_module_count + config->rso_overlay_count;
+    for (u32 i = 0; i < total; i++) {
+        const int overlay = i >= config->rso_module_count;
+        const RecompModule* placed =
+            overlay ? &config->rso_overlays[i - config->rso_module_count] : &config->rso_modules[i];
+        Module module = {0};
+        if (!load_module(&module, placed->file, game_dir)) {
+            free_module(&module);
+            return 0;
+        }
+        report(placed, &module, ram, count, overlay ? config->rso_overlay_heap_top : 0, overlay);
+        free_module(&module);
+    }
+    return 1;
+}
+
+int rso_locate(const char* game_dir, const char* file, const u8* mem1, u32 mem1_size, const u8* mem2,
+               u32 mem2_size, u32* base, u32* bss) {
+    const RamRegion ram[] = {{mem1, mem1_size, 0x80000000u}, {mem2, mem2_size, 0x90000000u}};
+    Module module = {0};
+    const int found = load_module(&module, file, game_dir)
+                          ? find_loaded(&module, ram, mem2 ? 2u : 1u, base, bss)
+                          : -1;
+    free_module(&module);
+    return found;
 }
