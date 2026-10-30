@@ -103,6 +103,26 @@ static int beside_config(char* out, size_t size, const char* config_path, const 
     return 1;
 }
 
+static int load_defines(RecompConfig* config, const toml_table_t* defines) {
+    const int count = toml_table_nkval(defines);
+    if (count < 0 || (u32)count > RECOMP_MAX_DEFINES) {
+        fprintf(stderr, "error: config [defines] holds up to %u constants\n", RECOMP_MAX_DEFINES);
+        return 0;
+    }
+    for (int i = 0; i < count; i++) {
+        const char* key = toml_key_in(defines, i);
+        RecompDefine* define = &config->defines[config->define_count++];
+        if (!key || strlen(key) >= sizeof(define->name)) {
+            fprintf(stderr, "error: config [defines] needs short names\n");
+            return 0;
+        }
+        strcpy(define->name, key);
+        if (!read_u32(toml_int_in(defines, key), &define->value, key))
+            return 0;
+    }
+    return 1;
+}
+
 int config_load(RecompConfig* config, const char* path) {
     memset(config, 0, sizeof(*config));
     FILE* file = fopen(path, "rb");
@@ -160,8 +180,10 @@ int config_load(RecompConfig* config, const char* path) {
 
     const toml_table_t* rso = toml_table_in(root, "rso");
     const toml_table_t* rel = toml_table_in(root, "rel");
+    const toml_table_t* defines = toml_table_in(root, "defines");
     ok = (!rso || load_rso(config, rso)) &&
-         (!rel || load_modules(rel, "rel", "modules", false, config->rel_modules, &config->rel_module_count));
+         (!rel || load_modules(rel, "rel", "modules", false, config->rel_modules, &config->rel_module_count)) &&
+         (!defines || load_defines(config, defines));
 
 done:
     toml_free(root);

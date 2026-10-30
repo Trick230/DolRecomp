@@ -638,6 +638,8 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     if (ok && signatures.count)
         printf("natives: %u guest functions with host implementations, of %u signatures\n",
                natives.count, signatures.count);
+    for (u32 i = 0; ok && i < config->define_count; i++)
+        ok = natives_add_define(&natives, config->defines[i].name, config->defines[i].value);
     emit_set_natives(natives.entries, natives.count);
     char natives_header[1200];
     char natives_list[1200];

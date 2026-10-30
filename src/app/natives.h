@@ -82,6 +82,8 @@ int natives_sign(const LoadedCodeSection* sections, u32 section_count, u32 addre
 int natives_write_list(const DolRecompNativeList* list, const char* path);
 // Writes the defines as a C header (an empty one without any).
 int natives_write_header(const DolRecompNativeList* list, const char* path);
+// Adds a define of the game's own (the config's [defines]) to the header.
+int natives_add_define(DolRecompNativeList* list, const char* name, long long value);
 void natives_free(DolRecompNativeList* list);
 
 #endif

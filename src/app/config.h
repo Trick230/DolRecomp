@@ -24,6 +24,13 @@
 //   [rel]
 //   modules = [{ file = "files/stage.rel", base = 0x80400000, bss = 0x80480000 }, ...]
 //
+//   [defines]
+//   IDLE_PC = 0x8036623C
+//
+// [defines] are constants of the game's own that its runtime compiles
+// against, written to ppc_natives.h with the ones the natives list reads off
+// the code (see app/natives.h).
+//
 // A module's base is where the game loads its file, its bss what the game
 // hands the linker for the bss (needed only when the module has one).
 // Overlays are RSO modules loaded at times into memory others use (see
@@ -37,12 +44,18 @@
 #define RECOMP_MAX_STATIC_SECTIONS 32u
 #define RECOMP_MAX_MODULES 32u
 #define RECOMP_MAX_NATIVES_FILES 16u
+#define RECOMP_MAX_DEFINES 32u
 
 typedef struct {
     char file[512];
     u32 base;
     u32 bss;  // 0 when not given
 } RecompModule;
+
+typedef struct {
+    char name[64];
+    u32 value;
+} RecompDefine;
 
 typedef struct {
     char dol[512];
@@ -62,6 +75,9 @@ typedef struct {
 
     RecompModule rel_modules[RECOMP_MAX_MODULES];  // [rel]
     u32 rel_module_count;
+
+    RecompDefine defines[RECOMP_MAX_DEFINES];  // [defines]
+    u32 define_count;
 } RecompConfig;
 
 int config_load(RecompConfig* config, const char* path);

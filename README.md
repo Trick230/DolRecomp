@@ -74,6 +74,8 @@ links it. Addresses in its own code come out as the compiled ones plus
 adds the shift of the module or of its bss. Its function hashes leave out
 the instruction bits its placement changes (`GuestOverlay.relocs`). The
 runtime reads where the game linked each overlay and sets the shifts.
+Constants of the game's own its runtime compiles against (`[defines]`, such
+as an idle loop's address) go to `ppc_natives.h` with the natives' defines.
 `src/app/config.h` shows the format. DualizeRecomp's is
 `DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
 `ppc_recomp.h`, `ppc_tables.inc`, `ppc_natives.h` and `natives.txt` (what the
