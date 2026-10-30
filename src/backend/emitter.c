@@ -1503,6 +1503,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MTFSB0:
     case PPC_OP_MTFSB1:
+        fprintf(out, "    ppc_fpscr_sync(ctx);\n");
         fprintf(out, "    {\n");
         fprintf(out, "        u32 mask = 0x80000000u >> %u;\n", inst->rD);
         if (inst->op == PPC_OP_MTFSB0) {
@@ -1519,12 +1520,14 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_MFFS:
+        fprintf(out, "    ppc_fpscr_sync(ctx);\n");
         fprintf(out, "    ctx->fpr[%u] = dolrecomp_f64_from_bits(0xFFF8000000000000ull | ctx->fpscr);\n", inst->rD);
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_MCRFS: {
         u32 shift = cr_field_shift(inst->crfS);
+        fprintf(out, "    ppc_fpscr_sync(ctx);\n");
         u32 dst_shift = cr_field_shift(inst->crfD);
         fprintf(out, "    {\n");
         fprintf(out, "        u32 field = (ctx->fpscr >> %u) & 0xFu;\n", shift);
@@ -1537,6 +1540,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MTFSFI: {
         u32 shift = cr_field_shift(inst->crfD);
+        fprintf(out, "    ppc_fpscr_sync(ctx);\n");
         fprintf(out, "    ctx->fpscr = (ctx->fpscr & ~(0xFu << %u)) | (0x%Xu << %u);\n",
                 shift, inst->imm, shift);
         fprintf(out, "    ppc_fpscr_updated(ctx);\n");
@@ -1545,6 +1549,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     }
 
     case PPC_OP_MTFSF:
+        fprintf(out, "    ppc_fpscr_sync(ctx);\n");
         fprintf(out, "    {\n");
         fprintf(out, "        u32 mask = 0;\n");
         fprintf(out, "        for (u32 i = 0; i < 8; i++) if (0x%02Xu & (1u << i)) mask |= 0xFu << (i * 4);\n", inst->fm);

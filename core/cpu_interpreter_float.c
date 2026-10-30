@@ -174,6 +174,18 @@ u32 classify_f32(f32 value) {
 
 void set_fprf(CPUState* cpu, u32 value) {
     cpu->fpscr = (cpu->fpscr & ~(0x1Fu << 12)) | ((value & 0x1Fu) << 12);
+    cpu->fprf_kind = PPC_FPRF_STORED;
+}
+
+void ppc_fprf_fold(CPUState* cpu) {
+    const u32 kind = cpu->fprf_kind;
+    u32 fprf = (kind & PPC_FPRF_F32)   ? ppc_fprf_f32((f32)cpu->fprf_value)
+               : (kind & PPC_FPRF_F64) ? ppc_fprf_f64(cpu->fprf_value)
+                                       : (cpu->fpscr >> 12) & 0x1Fu;
+    if (kind & PPC_FPRF_CC)
+        fprf = (fprf & 0x10u) | cpu->fprf_cc;
+    cpu->fpscr = (cpu->fpscr & ~(0x1Fu << 12)) | (fprf << 12);
+    cpu->fprf_kind = PPC_FPRF_STORED;
 }
 
 bool ppc_fres(CPUState* cpu, f64 value, f64* result) {
@@ -725,6 +737,7 @@ void ppc_fcmp(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered) {
         compare = 0x2u;
     }
 
+    ppc_fpscr_sync(cpu);
     cpu->fpscr = (cpu->fpscr & ~(0xFu << 12)) | (compare << 12);
     u32 shift = 4u * (7u - crfd);
     cpu->cr = (cpu->cr & ~(0xFu << shift)) | (compare << shift);

@@ -148,6 +148,13 @@ struct CPUState {
     u32 cr;
     u32 xer;
     u32 fpscr;
+    /* FPSCR[FPRF] is classified when something reads it: an arithmetic result
+     * leaves its value and width here (fprf_kind), a compare its FPCC in
+     * fprf_cc. PPC_FPRF_STORED means the bits in fpscr are current.
+     * ppc_fpscr_sync folds them in. */
+    u32 fprf_kind;
+    f64 fprf_value;
+    u32 fprf_cc;
     u32 msr;
     u32 srr0;
     u32 srr1;
@@ -722,6 +729,21 @@ GXRUNTIME_PS_INLINE f32 ppc_force_single_fast(const CPUState* cpu, f64 value) {
     return (f32)value;
 }
 
+enum {
+    PPC_FPRF_STORED = 0,
+    PPC_FPRF_F32 = 1,
+    PPC_FPRF_F64 = 2,
+    PPC_FPRF_CC = 4, /* FPCC from fprf_cc; C still from the class */
+};
+
+void ppc_fprf_fold(CPUState* cpu);
+
+/* Before reading or writing FPSCR bits 12-16 directly. */
+GXRUNTIME_PS_INLINE void ppc_fpscr_sync(CPUState* cpu) {
+    if (cpu->fprf_kind != PPC_FPRF_STORED)
+        ppc_fprf_fold(cpu);
+}
+
 GXRUNTIME_PS_INLINE u32 ppc_fprf_f32(f32 value) {
     u32 bits;
     memcpy(&bits, &value, 4);
@@ -740,20 +762,26 @@ GXRUNTIME_PS_INLINE u32 ppc_fprf_f64(f64 value) {
          : (sign ? 0x08u : 0x04u);
 }
 
-GXRUNTIME_PS_INLINE void ppc_set_fprf_fast(CPUState* cpu, u32 fprf) {
-    cpu->fpscr = (cpu->fpscr & ~(0x1Fu << 12)) | (fprf << 12);
+GXRUNTIME_PS_INLINE void ppc_fprf_of_f32(CPUState* cpu, f32 value) {
+    cpu->fprf_value = (f64)value;
+    cpu->fprf_kind = PPC_FPRF_F32;
+}
+
+GXRUNTIME_PS_INLINE void ppc_fprf_of_f64(CPUState* cpu, f64 value) {
+    cpu->fprf_value = value;
+    cpu->fprf_kind = PPC_FPRF_F64;
 }
 
 GXRUNTIME_PS_INLINE void ppc_write_single_fast(CPUState* cpu, u8 d, f32 value) {
     cpu->fpr[d] = (f64)value;
     cpu->ps1[d] = (f64)value;
-    ppc_set_fprf_fast(cpu, ppc_fprf_f32(value));
+    ppc_fprf_of_f32(cpu, value);
 }
 
 GXRUNTIME_PS_INLINE void ppc_write_pair_fast(CPUState* cpu, u8 d, f32 ps0, f32 ps1, f32 fprf_of) {
     cpu->fpr[d] = (f64)ps0;
     cpu->ps1[d] = (f64)ps1;
-    ppc_set_fprf_fast(cpu, ppc_fprf_f32(fprf_of));
+    ppc_fprf_of_f32(cpu, fprf_of);
 }
 
 /* ni_madd_msub for singles: a * Force25Bit(c) + b with one host rounding,
@@ -911,7 +939,7 @@ GXRUNTIME_PS_INLINE void ppc_fdivs_inline(CPUState* cpu, u8 d, u8 a, u8 b) {
 
 GXRUNTIME_PS_INLINE void ppc_write_double_fast(CPUState* cpu, u8 d, f64 value) {
     cpu->fpr[d] = value;
-    ppc_set_fprf_fast(cpu, ppc_fprf_f64(value));
+    ppc_fprf_of_f64(cpu, value);
 }
 
 GXRUNTIME_PS_INLINE void ppc_fadd_inline(CPUState* cpu, u8 d, u8 a, u8 b) {
@@ -959,12 +987,12 @@ GXRUNTIME_PS_INLINE bool ppc_fma_inline(CPUState* cpu, f64 a, f64 c, f64 b, bool
         result = (f64)(f32)ppc_madd_single_fast(a, c, addend);
         if (negative)
             result = -result;
-        ppc_set_fprf_fast(cpu, ppc_fprf_f32((f32)result));
+        ppc_fprf_of_f32(cpu, (f32)result);
     } else {
         result = fma(a, c, addend);
         if (negative)
             result = -result;
-        ppc_set_fprf_fast(cpu, ppc_fprf_f64(result));
+        ppc_fprf_of_f64(cpu, result);
     }
     *output = result;
     return true;
@@ -1002,7 +1030,8 @@ GXRUNTIME_PS_INLINE void ppc_fcmp_inline(CPUState* cpu, u8 crfd, f64 a, f64 b, b
     }
     const u32 compare = a < b ? 0x8u : a > b ? 0x4u : 0x2u;
     const u32 shift = 4u * (7u - crfd);
-    cpu->fpscr = (cpu->fpscr & ~(0xFu << 12)) | (compare << 12);
+    cpu->fprf_cc = compare;
+    cpu->fprf_kind |= PPC_FPRF_CC;
     cpu->cr = (cpu->cr & ~(0xFu << shift)) | (compare << shift);
 }
 u32 ppc_eciwx(CPUState* cpu, u32 ea, u32 cia);
