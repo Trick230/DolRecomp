@@ -372,16 +372,6 @@ is a complete runtime to read alongside this list.
 - **A resident REL importing from a REL overlay.** When the overlay loads, the
   game's linker patches the resident module's code; those functions then no
   longer match their hashes and run on the runtime's fallback.
-- **No absolute words in moving modules' code.** A module compiled to run
-  anywhere can't have a 32-bit absolute relocation inside its code;
-  DolRecomp stops with an error if it finds one. Compilers don't emit them.
-- **Instructions left to the runtime.** `mtspr`, most `mfspr`, `icbi` and
-  similar system instructions call `instruction_fallback` or the SPR
-  callbacks.
-- **Not supported:** the Wii U's Espresso, executables other than DOLs, and
-  module formats other than RSO and REL.
-- **Guest memory is big-endian.** Loads and stores byte-swap; the game's data
-  keeps the console's layout.
 
 ## Tests
 
