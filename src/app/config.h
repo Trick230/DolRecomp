@@ -31,6 +31,8 @@
 // against, written to ppc_natives.h with the ones the natives list reads off
 // the code (see app/natives.h).
 //
+// A module's file may run through RARC or U8 archives, either of them or the
+// file Yaz0-compressed ("files/RELS.szs/rels/stage.rel"; app/game_file.h).
 // A module's base is where the game loads its file, its bss what the game
 // hands the linker for the bss (needed only when the module has one).
 // Overlays are RSO modules loaded at times into memory others use (see

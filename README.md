@@ -61,6 +61,9 @@ the addresses they load at (and their bss): RSO modules (`[rso]`), linked
 against the static module's exports, and REL modules (`[rel]`), linked
 against the DOL and each other as `OSLink` does, with imports of a module not
 listed left as in the file. Their code is recompiled with the DOL's.
+A module's `file` may run through archives, as in
+`files/RELS.szs/rels/stage.rel`: RARC and U8 archives, and Yaz0 compression
+of the archive or the file, are read as the game reads them.
 RSO overlays (`[rso] overlays`) are modules the game loads at times into
 memory other code uses at other times, like one stage after another: each
 links against the resident modules alone and gets functions of its own

@@ -372,14 +372,26 @@ bool rel_apply_relocations(RELFile* rel, const RELModuleMap* modules) {
 
 bool rel_load_image(RELFile* rel, const char* path, u32 base_address) {
     memset(rel, 0, sizeof(*rel));
+    if (!read_file(rel, path))
+        return false;
+    return rel_load_image_bytes(rel, rel->file_data, rel->file_size, base_address);
+}
+
+bool rel_load_image_bytes(RELFile* rel, u8* data, u32 size, u32 base_address) {
+    memset(rel, 0, sizeof(*rel));
+    rel->file_data = data;
+    rel->file_size = size;
 
     if ((base_address & 3u) != 0) {
         fprintf(stderr, "error: REL base address is not instruction-aligned\n");
+        rel_free(rel);
         return false;
     }
-
-    if (!read_file(rel, path))
+    if (size < REL_HEADER_MIN_SIZE) {
+        fprintf(stderr, "error: file too small to be a REL (%u bytes)\n", size);
+        rel_free(rel);
         return false;
+    }
 
     const u8* h = rel->file_data;
     rel->module_id = read_be32(h + 0x00);

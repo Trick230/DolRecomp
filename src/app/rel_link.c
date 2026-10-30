@@ -1,7 +1,7 @@
+#include "app/game_file.h"
 #include "app/module_link.h"
 
 #include "frontend/container/rel.h"
-#include "platform/fs.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,9 +20,10 @@ int rel_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
     while (loaded < module_count) {
         const RecompModule* placed = &config->rel_modules[loaded];
         RELFile* rel = &rels[loaded];
-        char path[1200];
-        if (!join_path(path, sizeof(path), game_dir, placed->file) ||
-            !rel_load_image(rel, path, placed->base)) {
+        u8* bytes = NULL;
+        u32 size = 0;
+        if (!game_file_read(game_dir, placed->file, &bytes, &size) ||
+            !rel_load_image_bytes(rel, bytes, size, placed->base)) {
             fprintf(stderr, "error: can't read REL module %s\n", placed->file);
             goto done;
         }

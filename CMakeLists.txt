@@ -62,6 +62,7 @@ target_include_directories(tomlc99 PUBLIC thirdparty/tomlc99)
 
 add_library(dr_app STATIC
     src/app/config.c
+    src/app/game_file.c
     src/app/module_link.c
     src/app/natives.c
     src/app/recompile.c
@@ -102,7 +103,7 @@ target_link_libraries(dr_guest INTERFACE dr_core)
 
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
-    foreach(test natives rel_link rso_link sigdb)
+    foreach(test game_file natives rel_link rso_link sigdb)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE dr_app)
         add_test(NAME ${test} COMMAND test_${test})

@@ -1,6 +1,5 @@
+#include "app/game_file.h"
 #include "app/module_link.h"
-
-#include "platform/fs.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,20 +57,7 @@ static const char* cstring(const Bytes* b, u32 offset) {
 }
 
 static int read_file(const char* dir, const char* name, Bytes* out) {
-    char path[1200];
-    if (!join_path(path, sizeof(path), dir, name))
-        return 0;
-    FILE* file = fopen(path, "rb");
-    if (!file)
-        return 0;
-    fseek(file, 0, SEEK_END);
-    const long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    out->data = size > 0 ? (u8*)malloc((size_t)size) : NULL;
-    out->size = (u32)size;
-    const int ok = out->data && fread(out->data, 1, (size_t)size, file) == (size_t)size;
-    fclose(file);
-    return ok;
+    return game_file_read(dir, name, &out->data, &out->size);
 }
 
 static int parse_header(const Bytes* f, RsoHeader* h) {

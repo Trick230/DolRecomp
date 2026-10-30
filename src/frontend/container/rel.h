@@ -53,6 +53,9 @@ typedef struct {
 
 bool rel_load(RELFile* rel, const char* path, u32 base_address);
 bool rel_load_image(RELFile* rel, const char* path, u32 base_address);
+// The same over a file already read; takes ownership of data (freed by rel_free,
+// or here on failure).
+bool rel_load_image_bytes(RELFile* rel, u8* data, u32 size, u32 base_address);
 bool rel_apply_relocations(RELFile* rel, const RELModuleMap* modules);
 void rel_free(RELFile* rel);
 void rel_print_info(const RELFile* rel, const char* game_name);
