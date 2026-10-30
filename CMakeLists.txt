@@ -67,7 +67,8 @@ add_library(dr_app STATIC
     src/app/recompile.c
     src/app/rel_link.c
     src/app/rso_link.c
-    src/app/setup.c)
+    src/app/setup.c
+    src/app/sigdb.c)
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
 target_link_libraries(dr_app PUBLIC dr_backend tomlc99)
 
@@ -101,7 +102,7 @@ target_link_libraries(dr_guest INTERFACE dr_core)
 
 if(DOLRECOMP_BUILD_TESTS)
     enable_testing()
-    foreach(test natives rel_link rso_link)
+    foreach(test natives rel_link rso_link sigdb)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE dr_app)
         add_test(NAME ${test} COMMAND test_${test})

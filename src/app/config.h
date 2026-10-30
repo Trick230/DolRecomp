@@ -4,12 +4,14 @@
 #include "common/types.h"
 
 // A game's recompilation, as one TOML file. Paths in [main], [rso] and [rel]
-// are relative to the game's extracted disc, natives' files to the config file
-// (see app/natives.h: the game's runtime implements what they name).
+// are relative to the game's extracted disc, natives' files and the sigdb to
+// the config file unless absolute (see app/natives.h: the game's runtime
+// implements what they name; app/sigdb.h for the sigdb).
 //
 //   [main]
 //   dol = "sys/main.dol"
 //   natives = ["mwcc.sigs", "rvl.sigs", "sdk.sigs"]
+//   sigdb = "C:/Program Files/Dolphin/Sys/totaldb.dsy"
 //   shards = 64
 //
 //   [rso]
@@ -46,6 +48,7 @@ typedef struct {
     char dol[512];
     char natives[RECOMP_MAX_NATIVES_FILES][1024];
     u32 natives_count;
+    char sigdb[1024];  // empty without one
     u32 shards;
 
     char sel[512];  // empty without [rso]

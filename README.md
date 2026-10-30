@@ -78,8 +78,17 @@ RAM dump (MEM1 and MEM2 as Dolphin dumps them) and prints their config lines,
 checked against the config, with the heap top an overlay implies.
 
 `dolrecomp sign <main.dol> <address> <size>` prints a new native's signature
-fields; `tools/find_sdk_symbols.py` names a DOL's SDK functions from Dolphin's
-signature database, to find where a game's SDK functions are.
+fields.
+
+With `sigdb` in `[main]` pointing at Dolphin's signature database
+(`Sys/totaldb.dsy` in a Dolphin install; GPL-2.0-or-later, so it is read from
+there, not shipped here), the output directory also gets `sdk_names.txt`, the
+SDK functions it names in the resident code, and `sigs_candidates.txt`: for
+each signature the game didn't match whose SDK name the database found, the
+`.sigs` line the code there takes. That is where bringing natives to a second
+game starts; the database only checksums opcodes, so a candidate is a
+function with the right name and shape, to check against the native's SDK
+build before use. Code whose shape occurs twice in the game names nothing.
 
 ## Build
 

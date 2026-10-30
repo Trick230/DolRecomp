@@ -88,6 +88,21 @@ static int load_rso(RecompConfig* config, const toml_table_t* rso) {
             load_modules(rso, "rso", "overlays", heap, config->rso_overlays, &config->rso_overlay_count));
 }
 
+// A file the config names: relative to the config file unless absolute.
+static int beside_config(char* out, size_t size, const char* config_path, const char* file) {
+    const bool absolute = file[0] == '/' || file[0] == '\\' || (file[0] && file[1] == ':');
+    const char* slash = strrchr(config_path, '/');
+    const char* backslash = strrchr(config_path, '\\');
+    if (backslash > slash)
+        slash = backslash;
+    const int dir = absolute || !slash ? 0 : (int)(slash - config_path + 1);
+    if (snprintf(out, size, "%.*s%s", dir, config_path, file) >= (int)size) {
+        fprintf(stderr, "error: path too long: %s\n", file);
+        return 0;
+    }
+    return 1;
+}
+
 int config_load(RecompConfig* config, const char* path) {
     memset(config, 0, sizeof(*config));
     FILE* file = fopen(path, "rb");
@@ -120,23 +135,19 @@ int config_load(RecompConfig* config, const char* path) {
                     RECOMP_MAX_NATIVES_FILES);
             goto done;
         }
-        // Files relative to the config file; "@name" as is.
-        const char* slash = strrchr(path, '/');
-        const char* backslash = strrchr(path, '\\');
-        if (backslash > slash)
-            slash = backslash;
-        const int dir = slash ? (int)(slash - path + 1) : 0;
         for (int i = 0; i < count; i++) {
             char file[512];
-            if (!copy_string(file, sizeof(file), toml_string_at(natives, i), "main.natives"))
+            if (!copy_string(file, sizeof(file), toml_string_at(natives, i), "main.natives") ||
+                !beside_config(config->natives[config->natives_count++], sizeof(config->natives[0]),
+                               path, file))
                 goto done;
-            char* out = config->natives[config->natives_count++];
-            if (snprintf(out, sizeof(config->natives[0]), "%.*s%s", file[0] == '@' ? 0 : dir, path,
-                         file) >= (int)sizeof(config->natives[0])) {
-                fprintf(stderr, "error: natives path is too long\n");
-                goto done;
-            }
         }
+    }
+    if (toml_key_exists(main, "sigdb")) {
+        char file[512];
+        if (!copy_string(file, sizeof(file), toml_string_in(main, "sigdb"), "main.sigdb") ||
+            !beside_config(config->sigdb, sizeof(config->sigdb), path, file))
+            goto done;
     }
 
     config->shards = 64;

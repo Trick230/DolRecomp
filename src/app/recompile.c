@@ -5,6 +5,7 @@
 #include "analysis/functions.h"
 #include "app/natives.h"
 #include "app/module_link.h"
+#include "app/sigdb.h"
 #include "backend/codegen.h"
 #include "backend/emitter.h"
 #include "frontend/container/dol.h"
@@ -579,6 +580,13 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
         ok = ok && module->entry_targets;
         if (ok && g == 0)
             printf("entry targets: %u\n", module->entry_target_count);
+        if (ok && g == 0 && config->sigdb[0]) {
+            SigDB db;
+            ok = sigdb_load(&db, config->sigdb) &&
+                 sigdb_report(&db, &module->analysis, module->sections, module->section_count, &signatures,
+                              &natives, out_dir);
+            sigdb_free(&db);
+        }
         module->first_id = first_id;
         first_id += module->analysis.function_count;
     }
