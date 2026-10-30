@@ -350,8 +350,8 @@ static void call_table_free(CallTable* table) {
 // source. Every function of a group is known before any is written, so a call
 // between two of them, or from an overlay to resident code, is a direct C
 // call.
-static int emit_groups(const Module* groups, u32 group_count, const char* out_dir, u32 entry_point,
-                       u32 shards) {
+static int emit_groups(const Module* groups, u32 group_count, const char* out_dir, DolRecompCPU cpu,
+                       u32 entry_point, u32 shards) {
     char header_path[1200], chunks_dir[1200], tables_path[1200];
     if (!join_path(header_path, sizeof(header_path), out_dir, HEADER_NAME) ||
         !join_path(chunks_dir, sizeof(chunks_dir), out_dir, "chunks") ||
@@ -376,7 +376,7 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
         return 0;
     }
     FILE* header = header_output.stream;
-    emit_header_for_cpu(header, DOLRECOMP_CPU_BROADWAY);
+    emit_header_for_cpu(header, cpu);
     fprintf(header, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     if (group_count > 1) {
         fprintf(header, "\n/* How far each overlay, and its bss, loaded from where it was compiled\n"
@@ -698,7 +698,7 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
         first_id += module->analysis.function_count;
     }
     ok = ok && write_function_list(groups, group_count, out_dir) &&
-         emit_groups(groups, group_count, out_dir, dol.header.entry_point, config->shards);
+         emit_groups(groups, group_count, out_dir, config->cpu, dol.header.entry_point, config->shards);
 
     emit_set_entry_targets(NULL, 0);
     emit_set_natives(NULL, 0);

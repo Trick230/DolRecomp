@@ -56,7 +56,8 @@ dolrecomp rso-find <config.toml> <extracted game> <mem1 dump> [mem2 dump]
 dolrecomp --setup     # download Wiimms ISO Tools for extract
 ```
 
-The config names the DOL, the natives' signature sets and the modules with
+The config names the DOL, the console's CPU (`cpu = "gekko"` or
+`"broadway"`), the natives' signature sets and the modules with
 the addresses they load at (and their bss): RSO modules (`[rso]`), linked
 against the static module's exports, and REL modules (`[rel]`), linked
 against the DOL and each other as `OSLink` does, with imports of a module not

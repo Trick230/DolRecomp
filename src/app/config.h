@@ -1,6 +1,7 @@
 #ifndef DOLRECOMP_APP_CONFIG_H
 #define DOLRECOMP_APP_CONFIG_H
 
+#include "backend/emitter.h"
 #include "common/types.h"
 
 // A game's recompilation, as one TOML file. Paths in [main], [rso] and [rel]
@@ -10,6 +11,7 @@
 //
 //   [main]
 //   dol = "sys/main.dol"
+//   cpu = "broadway"
 //   natives = ["mwcc.sigs", "rvl.sigs", "sdk.sigs"]
 //   sigdb = "C:/Program Files/Dolphin/Sys/totaldb.dsy"
 //   shards = 64
@@ -27,6 +29,8 @@
 //   [defines]
 //   IDLE_PC = 0x8036623C
 //
+// cpu is the console's: "gekko" (GameCube) or "broadway" (Wii, the default).
+// The output's header defines DOLRECOMP_CPU_GEKKO or DOLRECOMP_CPU_BROADWAY.
 // [defines] are constants of the game's own that its runtime compiles
 // against, written to ppc_natives.h with the ones the natives list reads off
 // the code (see app/natives.h).
@@ -61,6 +65,7 @@ typedef struct {
 
 typedef struct {
     char dol[512];
+    DolRecompCPU cpu;
     char natives[RECOMP_MAX_NATIVES_FILES][1024];
     u32 natives_count;
     char sigdb[1024];  // empty without one

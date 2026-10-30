@@ -170,6 +170,19 @@ int config_load(RecompConfig* config, const char* path) {
             goto done;
     }
 
+    config->cpu = DOLRECOMP_CPU_BROADWAY;
+    if (toml_key_exists(main, "cpu")) {
+        char cpu[16];
+        if (!copy_string(cpu, sizeof(cpu), toml_string_in(main, "cpu"), "main.cpu"))
+            goto done;
+        if (strcmp(cpu, "gekko") == 0) {
+            config->cpu = DOLRECOMP_CPU_GEKKO;
+        } else if (strcmp(cpu, "broadway") != 0) {
+            fprintf(stderr, "error: config main.cpu must be \"gekko\" or \"broadway\"\n");
+            goto done;
+        }
+    }
+
     config->shards = 64;
     if (toml_key_exists(main, "shards") &&
         (!read_u32(toml_int_in(main, "shards"), &config->shards, "main.shards") ||
