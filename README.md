@@ -1,4 +1,4 @@
-# DolRecomp
+# DolRecomp (DualizeRecomp fork)
 
 A static recompiler for GameCube and Wii games. DolRecomp reads a game's
 `main.dol` and its loadable modules (RSO and REL), finds every function, and
