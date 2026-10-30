@@ -28,6 +28,30 @@ typedef struct {
     u32 address;
 } LinkedEntry;
 
+// A word of an overlay's code that depends on where the game loads it: the
+// bits outside keep_mask. An address-high also says whose shift its target
+// moves by (EmitHaReloc in backend/emitter.h).
+typedef enum {
+    LINKED_RELOC_PLAIN,
+    LINKED_RELOC_HA_MODULE,
+    LINKED_RELOC_HA_BSS,
+} LinkedRelocKind;
+
+typedef struct {
+    u32 group;
+    u32 address;
+    u32 keep_mask;
+    LinkedRelocKind kind;
+} LinkedReloc;
+
+// Where an overlay was linked: its file at base, its bss (section
+// bss_section of the module's table, ~0u for none) at bss.
+typedef struct {
+    u32 base;
+    u32 bss;
+    u32 bss_section;
+} LinkedOverlay;
+
 typedef struct {
     LinkedSection* text;
     u32 count;
@@ -35,6 +59,9 @@ typedef struct {
     u32 data_count;
     LinkedEntry* entries;  // where other code enters: exports, REL prologs/epilogs
     u32 entry_count;
+    LinkedReloc* relocs;
+    u32 reloc_count;
+    LinkedOverlay overlays[RECOMP_MAX_MODULES];  // overlay k's at k
 } ModuleLink;
 
 // Each adds the config's modules to the link.
@@ -54,6 +81,7 @@ int rso_locate(const char* game_dir, const char* file, const u8* mem1, u32 mem1_
 int module_link_add_section(ModuleLink* link, u32 group, bool code, const char* module,
                             u32 address, const u8* bytes, u32 size);
 int module_link_add_entry(ModuleLink* link, u32 group, u32 address);
+int module_link_add_reloc(ModuleLink* link, const LinkedReloc* reloc);
 void module_link_free(ModuleLink* link);
 
 #endif

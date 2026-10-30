@@ -41,6 +41,18 @@ int module_link_add_entry(ModuleLink* link, u32 group, u32 address) {
     return 1;
 }
 
+int module_link_add_reloc(ModuleLink* link, const LinkedReloc* reloc) {
+    if ((link->reloc_count & (link->reloc_count - 1u)) == 0) {
+        const u32 capacity = link->reloc_count ? link->reloc_count * 2u : 1u;
+        LinkedReloc* resized = (LinkedReloc*)realloc(link->relocs, capacity * sizeof(LinkedReloc));
+        if (!resized)
+            return 0;
+        link->relocs = resized;
+    }
+    link->relocs[link->reloc_count++] = *reloc;
+    return 1;
+}
+
 void module_link_free(ModuleLink* link) {
     for (u32 i = 0; i < link->count; i++)
         free(link->text[i].bytes);
@@ -49,5 +61,6 @@ void module_link_free(ModuleLink* link) {
     free(link->text);
     free(link->data);
     free(link->entries);
+    free(link->relocs);
     memset(link, 0, sizeof(*link));
 }

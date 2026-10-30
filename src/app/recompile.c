@@ -124,6 +124,13 @@ typedef struct {
     u32* entry_targets;
     u32 entry_target_count;
     u32 first_id;  // its first function's index in the runtime's table
+    // An overlay's: where it was linked, and the words of its code that
+    // depend on where it loads, by address (see app/module_link.h).
+    LinkedOverlay where;
+    const LinkedReloc* relocs;
+    u32 reloc_count;
+    EmitHaReloc* ha_relocs;
+    u32 ha_reloc_count;
 } Module;
 
 static void module_free(Module* module) {
@@ -131,6 +138,32 @@ static void module_free(Module* module) {
         free(module->insts[s]);
     function_analysis_free(&module->analysis);
     free(module->entry_targets);
+    free(module->ha_relocs);
+}
+
+// FNV-1a 64 of a function's text with the bits its placement changes cleared;
+// the runtime hashes guest RAM the same way.
+static u64 function_hash(const Module* module, const GuestFunction* f) {
+    const u8* bytes = section_bytes(module->sections, module->section_count, f->start, f->end);
+    if (!bytes)
+        return 0;
+    if (!module->reloc_count)
+        return fnv1a64(bytes, f->end - f->start);
+    u64 hash = 0xCBF29CE484222325ull;
+    const LinkedReloc* reloc = module->relocs;
+    const LinkedReloc* relocs_end = module->relocs + module->reloc_count;
+    while (reloc != relocs_end && reloc->address < f->start)
+        reloc++;
+    for (u32 address = f->start; address < f->end; address += 4u) {
+        u32 word = read_be32(bytes + (address - f->start));
+        for (; reloc != relocs_end && reloc->address == address; reloc++)
+            word &= reloc->keep_mask;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            hash ^= (u8)(word >> shift);
+            hash *= 0x100000001B3ull;
+        }
+    }
+    return hash;
 }
 
 static const LoadedCodeSection* s_sort_sections;
@@ -184,12 +217,9 @@ static int write_tables(const char* path, const Module* groups, u32 group_count)
     fprintf(out, "static const u64 s_function_hashes[] = {\n");
     for (u32 g = 0; g < group_count; g++) {
         const Module* module = &groups[g];
-        for (u32 i = 0; i < module->analysis.function_count; i++) {
-            const GuestFunction* f = &module->analysis.functions[i];
-            const u8* bytes = section_bytes(module->sections, module->section_count, f->start, f->end);
+        for (u32 i = 0; i < module->analysis.function_count; i++)
             fprintf(out, "    0x%016llXull,\n",
-                    (unsigned long long)(bytes ? fnv1a64(bytes, f->end - f->start) : 0));
-        }
+                    (unsigned long long)function_hash(module, &module->analysis.functions[i]));
     }
     fprintf(out, "};\n");
     fprintf(out, "#define DOLRECOMP_OVERLAY_COUNT %uu\n", group_count - 1u);
@@ -203,12 +233,25 @@ static int write_tables(const char* path, const Module* groups, u32 group_count)
             }
         }
         fprintf(out, "};\n");
-        fprintf(out, "static const GuestOverlay s_overlays[] = {\n");
-        u32 ranges = 0;
+        fprintf(out, "static const GuestReloc s_overlay_relocs[] = {\n");
         for (u32 g = 1; g < group_count; g++) {
-            fprintf(out, "    {\"%s\", s_overlay_code_ranges + %u, %u, %u, %u},\n", groups[g].name, ranges,
-                    groups[g].section_count, groups[g].first_id, groups[g].analysis.function_count);
-            ranges += groups[g].section_count;
+            for (u32 i = 0; i < groups[g].reloc_count; i++)
+                fprintf(out, "    {0x%08Xu, 0x%08Xu},\n", groups[g].relocs[i].address,
+                        groups[g].relocs[i].keep_mask);
+        }
+        fprintf(out, "    {0, 0},\n");  // never empty
+        fprintf(out, "};\n");
+        fprintf(out, "static const GuestOverlay s_overlays[] = {\n");
+        u32 ranges = 0, relocs = 0;
+        for (u32 g = 1; g < group_count; g++) {
+            const Module* module = &groups[g];
+            fprintf(out, "    {\"%s\", s_overlay_code_ranges + %u, %u, %u, %u, 0x%08Xu, 0x%08Xu, %uu, "
+                         "s_overlay_relocs + %u, %u},\n",
+                    module->name, ranges, module->section_count, module->first_id,
+                    module->analysis.function_count, module->where.base, module->where.bss,
+                    module->where.bss_section, relocs, module->reloc_count);
+            ranges += module->section_count;
+            relocs += module->reloc_count;
         }
         fprintf(out, "};\n");
     }
@@ -335,6 +378,11 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
     FILE* header = header_output.stream;
     emit_header_for_cpu(header, DOLRECOMP_CPU_BROADWAY);
     fprintf(header, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
+    if (group_count > 1) {
+        fprintf(header, "\n/* How far each overlay, and its bss, loaded from where it was compiled\n"
+                        "   for; the runtime's. */\n");
+        fprintf(header, "extern u32 dolrecomp_overlay_shift[];\nextern u32 dolrecomp_overlay_bss_shift[];\n");
+    }
     fprintf(header, "\n// Function entry points\n");
     for (u32 g = 0; g < group_count; g++) {
         for (u32 i = 0; i < groups[g].analysis.function_count; i++)
@@ -349,11 +397,20 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
         const FunctionAnalysis* analysis = &module->analysis;
         CallTable calls = {0};
         ok = build_call_table(&calls, groups, g);
+        u32 order[MAX_GROUP_SECTIONS], starts[MAX_GROUP_SECTIONS], ends[MAX_GROUP_SECTIONS];
         if (ok) {
             emit_set_function_table(calls.starts, calls.ends, g ? calls.ids : NULL,
                                     g ? calls.tags : NULL, calls.count);
             emit_set_symbol_tag(module->tag);
             emit_set_entry_targets(module->entry_targets, module->entry_target_count);
+            sort_sections(module, order);
+            for (u32 s = 0; s < module->section_count; s++) {
+                starts[s] = module->sections[order[s]].address;
+                ends[s] = starts[s] + module->sections[order[s]].size;
+            }
+            if (g)
+                emit_set_overlay(g, starts, ends, module->section_count, module->ha_relocs,
+                                 module->ha_reloc_count);
         }
         const u32 first_job = job_count;
         for (u32 s = 0; ok && s < module->section_count; s++) {
@@ -390,6 +447,7 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
         }
         emit_set_function_table(NULL, NULL, NULL, NULL, 0);
         emit_set_symbol_tag(NULL);
+        emit_set_overlay(0, NULL, NULL, 0, NULL, 0);
         call_table_free(&calls);
     }
     emit_footer(header);
@@ -461,6 +519,38 @@ static int write_function_list(const Module* groups, u32 group_count, const char
     return fclose(out) == 0;
 }
 
+static int compare_reloc(const void* left, const void* right) {
+    const LinkedReloc* a = (const LinkedReloc*)left;
+    const LinkedReloc* b = (const LinkedReloc*)right;
+    if (a->group != b->group)
+        return a->group < b->group ? -1 : 1;
+    return a->address < b->address ? -1 : a->address > b->address;
+}
+
+// What the emitter needs of an overlay's relocations: its address-highs, each
+// of which must be an addis for the shift to land in its register.
+static int overlay_ha_relocs(Module* module) {
+    module->ha_relocs = (EmitHaReloc*)malloc((module->reloc_count ? module->reloc_count : 1u) *
+                                             sizeof(EmitHaReloc));
+    if (!module->ha_relocs)
+        return 0;
+    for (u32 i = 0; i < module->reloc_count; i++) {
+        const LinkedReloc* reloc = &module->relocs[i];
+        if (reloc->kind == LINKED_RELOC_PLAIN)
+            continue;
+        const u8* word =
+            section_bytes(module->sections, module->section_count, reloc->address, reloc->address + 4u);
+        if (!word || read_be32(word) >> 26 != 15u || reloc->keep_mask != 0xFFFF0000u) {
+            fprintf(stderr, "error: %s: address-high at 0x%08X is not an addis\n", module->name,
+                    reloc->address);
+            return 0;
+        }
+        module->ha_relocs[module->ha_reloc_count++] =
+            (EmitHaReloc){reloc->address, reloc->kind == LINKED_RELOC_HA_BSS};
+    }
+    return 1;
+}
+
 // The C name tag of an overlay: its file name without the directory and
 // extension, as an identifier, then '_'.
 static void overlay_tag(char* tag, size_t size, const char* file) {
@@ -522,6 +612,21 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
             link.text[i].address, link.text[i].size, EMBEDDED_DATA_DOL};
         module->section_count++;
     }
+
+    if (link.reloc_count)
+        qsort(link.relocs, link.reloc_count, sizeof(LinkedReloc), compare_reloc);
+    for (u32 i = 0; ok && i < link.reloc_count;) {
+        Module* module = &groups[link.relocs[i].group];
+        u32 end = i;
+        while (end < link.reloc_count && link.relocs[end].group == link.relocs[i].group)
+            end++;
+        module->relocs = link.relocs + i;
+        module->reloc_count = end - i;
+        ok = overlay_ha_relocs(module);
+        i = end;
+    }
+    for (u32 g = 1; g < group_count; g++)
+        groups[g].where = link.overlays[g - 1u];
 
     DolRecompNativeList natives = {0};
     NativeSignatures signatures = {0};

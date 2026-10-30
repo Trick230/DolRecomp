@@ -67,7 +67,13 @@ links against the resident modules alone and gets functions of its own
 (`func_<module>_<address>`) next to the ones it overlaps; the runtime runs, of
 the functions over a pc, the one whose hash matches guest RAM. An overlay
 can leave its address to `overlay_heap_top`: the SDK's expanded heap hands
-out its file and bss from the tail of the free space ending there.
+out its file and bss from the tail of the free space ending there. That
+address is only where it is compiled for: its code runs wherever the game
+links it. Addresses in its own code come out as the compiled ones plus
+`dolrecomp_overlay_shift[k]`, and each `lis` of an address in the module
+adds the shift of the module or of its bss. Its function hashes leave out
+the instruction bits its placement changes (`GuestOverlay.relocs`). The
+runtime reads where the game linked each overlay and sets the shifts.
 `src/app/config.h` shows the format. DualizeRecomp's is
 `DualizeRecompLib/config/R7EE8P.toml`. The output directory gets the shards,
 `ppc_recomp.h`, `ppc_tables.inc`, `ppc_natives.h` and `natives.txt` (what the

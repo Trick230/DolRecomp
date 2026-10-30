@@ -264,6 +264,54 @@ static int add_to_entries(void* user, const char* name, u32 address) {
     return module_link_add_entry(list->link, list->group, address);
 }
 
+static bool code_section(const RsoHeader* h, u32 index) {
+    return index == h->prolog_section || index == h->epilog_section || index == h->unresolved_section;
+}
+
+// Whether a module file offset is in one of its code sections.
+static bool in_code(const Module* module, u32 offset) {
+    const RsoHeader* h = &module->header;
+    for (u32 i = 0; i < h->section_count; i++) {
+        const u8* table = module->file.data + h->section_table + i * 8u;
+        const u32 start = read_be32(table) & ~1u;
+        if (start && code_section(h, i) && offset - start < read_be32(table + 4))
+            return true;
+    }
+    return false;
+}
+
+// Notes a relocation of an overlay's code that its placement changes: an
+// absolute one to the module's own sections (into its bss or not), or a
+// relative one out of it.
+static int note_reloc(ModuleLink* link, u32 group, const Module* module, u32 offset, u8 type, bool internal,
+                      bool to_bss) {
+    if (group == 0 || !in_code(module, offset))
+        return 1;
+    LinkedReloc reloc = {group, module->base + (offset & ~3u), 0, LINKED_RELOC_PLAIN};
+    switch (type) {
+    case R_PPC_ADDR16_LO:
+    case R_PPC_ADDR16_HI:
+    case R_PPC_ADDR16_HA:
+        if (!internal)
+            return 1;
+        reloc.keep_mask = offset & 2u ? 0xFFFF0000u : 0x0000FFFFu;
+        if (type != R_PPC_ADDR16_LO)
+            reloc.kind = to_bss ? LINKED_RELOC_HA_BSS : LINKED_RELOC_HA_MODULE;
+        break;
+    case R_PPC_REL24:
+    case R_PPC_REL14:
+        if (internal)
+            return 1;
+        reloc.keep_mask = type == R_PPC_REL24 ? 0xFC000003u : 0xFFFF0003u;
+        break;
+    default:
+        // Code takes no absolute words; one would need its own shift.
+        fprintf(stderr, "error: relocation type %u in overlay code\n", type);
+        return 0;
+    }
+    return module_link_add_reloc(link, &reloc);
+}
+
 // Relocates a placed module against the exports (sorted by name) and adds its
 // sections to the link.
 static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, const Module* module,
@@ -283,7 +331,9 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         relocated = section < h->section_count &&
                     relocate(image, file->size, offset, (u8)info,
                              module->section_address[section] + read_be32(entry + 8),
-                             module->base + offset);
+                             module->base + offset) &&
+                    note_reloc(link, group, module, offset, (u8)info, true,
+                               module->section_address[section] == module->bss);
     }
     // Imports nothing exports stay bound to the module's unresolved stub,
     // which is also what the game's linker leaves them pointing at.
@@ -307,7 +357,8 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         missing += found == NULL;
         relocated = relocate(image, file->size, offset, (u8)info,
                              (found ? found->address : unresolved) + read_be32(entry + 8),
-                             module->base + offset);
+                             module->base + offset) &&
+                    note_reloc(link, group, module, offset, (u8)info, found == NULL, false);
     }
     if (!relocated) {
         fprintf(stderr, "error: %s: malformed or unsupported relocation\n", placed->file);
@@ -323,9 +374,7 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         const u32 offset = read_be32(table) & ~1u, size = read_be32(table + 4);
         if (offset == 0 || size == 0 || !fits(file, offset, size))
             continue;
-        const bool code = index == h->prolog_section || index == h->epilog_section ||
-                          index == h->unresolved_section;
-        ok = module_link_add_section(link, group, code, placed->file, module->base + offset,
+        ok = module_link_add_section(link, group, code_section(h, index), placed->file, module->base + offset,
                                      image + offset, size);
     }
     if (ok)
@@ -397,6 +446,16 @@ int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
         const int linked = place_module(&overlay, placed, config->rso_overlay_heap_top, game_dir) &&
                            visit_exports(&overlay, add_to_entries, &entries) &&
                            link_module(link, k + 1u, placed, &overlay, &exports);
+        if (linked) {
+            LinkedOverlay* where = &link->overlays[k];
+            where->base = overlay.base;
+            where->bss = overlay.bss;
+            where->bss_section = ~0u;
+            for (u32 i = 0; i < overlay.header.section_count; i++) {
+                if (overlay.bss && overlay.section_address[i] == overlay.bss)
+                    where->bss_section = i;
+            }
+        }
         free_module(&overlay);
         if (!linked)
             goto done;

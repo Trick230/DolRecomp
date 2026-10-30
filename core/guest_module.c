@@ -26,6 +26,9 @@ const GuestModule g_guest_module = {
     DOLRECOMP_OVERLAY_COUNT,
 };
 
+u32 dolrecomp_overlay_shift[DOLRECOMP_OVERLAY_COUNT ? DOLRECOMP_OVERLAY_COUNT : 1u];
+u32 dolrecomp_overlay_bss_shift[DOLRECOMP_OVERLAY_COUNT ? DOLRECOMP_OVERLAY_COUNT : 1u];
+
 void guest_set_direct_calls(const unsigned char* function_ok, u32 idle_pc)
 {
     dolrecomp_idle_pc = idle_pc;

@@ -22,8 +22,19 @@ typedef struct GuestRange
 // pc. It leaves the pc alone with no cycles charged if it has no entry there.
 typedef void (*GuestCode)(CPUState* ctx);
 
+// A word of an overlay's code whose bits outside keep_mask depend on where
+// the module loads.
+typedef struct GuestReloc
+{
+    u32 address;
+    u32 keep_mask;
+} GuestReloc;
+
 // A module the game loads at times into memory other code uses at other
 // times: its functions overlap the resident ones and the other overlays'.
+// Its code was compiled for one place (the file at base, its bss at bss) and
+// runs wherever the game loads it, given the shifts below; every address
+// here is a compiled one.
 typedef struct GuestOverlay
 {
     const char* name;
@@ -32,6 +43,13 @@ typedef struct GuestOverlay
     // Its functions' slice of the module's, tiling its code ranges.
     u32 first_function;
     u32 num_functions;
+    u32 base;
+    u32 bss;          // 0 for none
+    u32 bss_section;  // the bss's index in the module's section table
+    // Sorted by address. Its functions' hashes are of their text with these
+    // bits cleared.
+    const GuestReloc* relocs;
+    u32 num_relocs;
 } GuestOverlay;
 
 typedef struct GuestModule
@@ -53,6 +71,12 @@ typedef struct GuestModule
 } GuestModule;
 
 extern const GuestModule g_guest_module;
+
+// Overlay k's code runs as loaded at its base + dolrecomp_overlay_shift[k],
+// its bss at bss + dolrecomp_overlay_bss_shift[k]. The host runtime's to set,
+// while none of the overlay's functions counts as verified.
+extern u32 dolrecomp_overlay_shift[];
+extern u32 dolrecomp_overlay_bss_shift[];
 
 // Which functions generated code may call directly (one flag per function,
 // NULL for none), and the idle-loop pc that must keep returning to the runtime.

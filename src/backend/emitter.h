@@ -52,6 +52,19 @@ void emit_set_natives(const DolRecompNative* natives, u32 count);
 // Requires `out` to be readable back (opened "w+").
 void emit_set_entry_targets(const u32* targets, u32 count);
 
+// The code being written is overlay `index` (from 1; 0 for resident code),
+// compiled at one address and run wherever the game loads it: addresses in its
+// code ranges come out as that plus dolrecomp_overlay_shift[index - 1], and
+// the lis of each address-high relocation in `relocs` (sorted) adds the shift
+// of its target, the module's or its bss's (dolrecomp_overlay_bss_shift).
+// Same lifetime rules as the function table.
+typedef struct {
+    u32 address;
+    bool bss;
+} EmitHaReloc;
+void emit_set_overlay(u32 index, const u32* range_starts, const u32* range_ends, u32 range_count,
+                      const EmitHaReloc* relocs, u32 reloc_count);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 
