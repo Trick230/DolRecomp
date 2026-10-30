@@ -112,11 +112,12 @@ static const u8* section_bytes(const LoadedCodeSection* sections, u32 count, u32
 
 #define MAX_GROUP_SECTIONS (DOL_NUM_TEXT + 64)
 
-// One group's decoded text and the functions found in it: the resident code
-// (the DOL and the modules always loaded) or one overlay.
+// One group's decoded text and the functions found in it: the code that runs
+// where it was compiled (the DOL and the modules the config places), or one
+// module of its own (see app/module_link.h).
 typedef struct {
-    char tag[64];      // what its C names carry: "" for the resident group
-    const char* name;  // an overlay's config file name
+    char tag[64];      // what its C names carry: "" for group 0
+    const char* name;  // a module of its own's config file name
     LoadedCodeSection sections[MAX_GROUP_SECTIONS];
     u32 section_count;
     PPCInst* insts[MAX_GROUP_SECTIONS];
@@ -124,9 +125,10 @@ typedef struct {
     u32* entry_targets;
     u32 entry_target_count;
     u32 first_id;  // its first function's index in the runtime's table
-    // An overlay's: where it was linked, and the words of its code that
-    // depend on where it loads, by address (see app/module_link.h).
-    LinkedOverlay where;
+    // A module of its own's: where it was linked. Any group's: the words of
+    // its code that depend on where some module loads, by address (see
+    // app/module_link.h).
+    LinkedGroup where;
     const LinkedReloc* relocs;
     u32 reloc_count;
     EmitHaReloc* ha_relocs;
@@ -184,7 +186,7 @@ static void sort_sections(const Module* module, u32* order) {
 
 // The runtime's view of the code: what the dispatcher covers, and per
 // function its range, its code and the hash of the text it was built from.
-// The resident group's functions come first, then each overlay's, which also
+// Group 0's functions come first, then each module of its own's, which also
 // lists its own code ranges.
 static int write_tables(const char* path, const Module* groups, u32 group_count) {
     OutputFile output;
@@ -222,6 +224,12 @@ static int write_tables(const char* path, const Module* groups, u32 group_count)
                     (unsigned long long)function_hash(module, &module->analysis.functions[i]));
     }
     fprintf(out, "};\n");
+    fprintf(out, "#define DOLRECOMP_RESIDENT_RELOC_COUNT %uu\n", groups[0].reloc_count);
+    fprintf(out, "static const GuestReloc s_resident_relocs[] = {\n");
+    for (u32 i = 0; i < groups[0].reloc_count; i++)
+        fprintf(out, "    {0x%08Xu, 0x%08Xu},\n", groups[0].relocs[i].address, groups[0].relocs[i].keep_mask);
+    fprintf(out, "    {0, 0},\n");  // never empty
+    fprintf(out, "};\n");
     fprintf(out, "#define DOLRECOMP_OVERLAY_COUNT %uu\n", group_count - 1u);
     if (group_count > 1) {
         fprintf(out, "static const GuestRange s_overlay_code_ranges[] = {\n");
@@ -245,9 +253,9 @@ static int write_tables(const char* path, const Module* groups, u32 group_count)
         u32 ranges = 0, relocs = 0;
         for (u32 g = 1; g < group_count; g++) {
             const Module* module = &groups[g];
-            fprintf(out, "    {\"%s\", s_overlay_code_ranges + %u, %u, %u, %u, 0x%08Xu, 0x%08Xu, %uu, "
+            fprintf(out, "    {\"%s\", %uu, s_overlay_code_ranges + %u, %u, %u, %u, 0x%08Xu, 0x%08Xu, %uu, "
                          "s_overlay_relocs + %u, %u},\n",
-                    module->name, ranges, module->section_count, module->first_id,
+                    module->name, module->where.rel_id, ranges, module->section_count, module->first_id,
                     module->analysis.function_count, module->where.base, module->where.bss,
                     module->where.bss_section, relocs, module->reloc_count);
             ranges += module->section_count;
@@ -292,50 +300,70 @@ static int overlaps_group(const Module* group, u32 start, u32 end) {
     return 0;
 }
 
-// The functions a group's code calls directly: its own, and for an overlay
-// the resident ones it does not lie over, merged by address.
+// The functions a group's code calls directly: those of the code that runs
+// where it was compiled and of every resident module of its own group, and an
+// overlay's own, which take the place of any they lie over.
 typedef struct {
     u32* starts;
     u32* ends;
     u32* ids;
     const char** tags;
+    u32* groups;
     u32 count;
 } CallTable;
 
-static int build_call_table(CallTable* table, const Module* groups, u32 group) {
-    const FunctionAnalysis* resident = &groups[0].analysis;
-    const FunctionAnalysis* own = &groups[group].analysis;
-    const u32 capacity = resident->function_count + (group ? own->function_count : 0) + 1u;
+typedef struct {
+    u32 start, end, id, group;
+} CallEntry;
+
+static int compare_call_entry(const void* left, const void* right) {
+    const CallEntry* a = (const CallEntry*)left;
+    const CallEntry* b = (const CallEntry*)right;
+    return a->start < b->start ? -1 : a->start > b->start;
+}
+
+static int build_call_table(CallTable* table, const Module* groups, u32 group_count, u32 group) {
+    u32 capacity = 1u;
+    for (u32 g = 0; g < group_count; g++)
+        capacity += groups[g].analysis.function_count;
+    CallEntry* entries = (CallEntry*)malloc(capacity * sizeof(CallEntry));
     table->starts = (u32*)malloc(capacity * sizeof(u32));
     table->ends = (u32*)malloc(capacity * sizeof(u32));
     table->ids = (u32*)malloc(capacity * sizeof(u32));
     table->tags = (const char**)malloc(capacity * sizeof(const char*));
+    table->groups = (u32*)malloc(capacity * sizeof(u32));
     table->count = 0;
-    if (!table->starts || !table->ends || !table->ids || !table->tags)
+    if (!entries || !table->starts || !table->ends || !table->ids || !table->tags || !table->groups) {
+        free(entries);
         return 0;
-    u32 r = 0, o = 0;
-    const u32 own_count = group ? own->function_count : 0;
-    while (r < resident->function_count || o < own_count) {
-        const GuestFunction* rf = r < resident->function_count ? &resident->functions[r] : NULL;
-        const GuestFunction* of = o < own_count ? &own->functions[o] : NULL;
-        u32 n = table->count;
-        if (rf && (!of || rf->start < of->start)) {
-            r++;
-            if (group && overlaps_group(&groups[group], rf->start, rf->end))
+    }
+    const bool overlay = group && groups[group].where.overlay;
+    u32 count = 0;
+    for (u32 g = 0; g < group_count; g++) {
+        if (g && groups[g].where.overlay && g != group)
+            continue;
+        const FunctionAnalysis* analysis = &groups[g].analysis;
+        for (u32 i = 0; i < analysis->function_count; i++) {
+            const GuestFunction* f = &analysis->functions[i];
+            if (overlay && g != group && overlaps_group(&groups[group], f->start, f->end))
                 continue;
-            table->starts[n] = rf->start;
-            table->ends[n] = rf->end;
-            table->ids[n] = r - 1u;
-            table->tags[n] = NULL;
-        } else {
-            table->starts[n] = of->start;
-            table->ends[n] = of->end;
-            table->ids[n] = groups[group].first_id + o;
-            table->tags[n] = groups[group].tag;
-            o++;
+            entries[count++] = (CallEntry){f->start, f->end, groups[g].first_id + i, g};
         }
+    }
+    qsort(entries, count, sizeof(CallEntry), compare_call_entry);
+    for (u32 i = 0; i < count; i++) {
+        const u32 n = table->count;
+        // Modules placed over each other: the first keeps the addresses.
+        if (n && entries[i].start < table->ends[n - 1u])
+            continue;
+        table->starts[n] = entries[i].start;
+        table->ends[n] = entries[i].end;
+        table->ids[n] = entries[i].id;
+        table->tags[n] = groups[entries[i].group].tag;
+        table->groups[n] = entries[i].group;
         table->count++;
     }
+    free(entries);
     return 1;
 }
 
@@ -344,6 +372,7 @@ static void call_table_free(CallTable* table) {
     free(table->ends);
     free(table->ids);
     free(table->tags);
+    free(table->groups);
 }
 
 // One C function per guest function, about CHUNK_INSTRUCTIONS of them to a
@@ -379,8 +408,8 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
     emit_header_for_cpu(header, cpu);
     fprintf(header, "\n#define DOLRECOMP_ENTRY_POINT 0x%08Xu\n", entry_point);
     if (group_count > 1) {
-        fprintf(header, "\n/* How far each overlay, and its bss, loaded from where it was compiled\n"
-                        "   for; the runtime's. */\n");
+        fprintf(header, "\n/* How far each module of its own group, and its bss, loaded from where it\n"
+                        "   was compiled for; the runtime's. */\n");
         fprintf(header, "extern u32 dolrecomp_overlay_shift[];\nextern u32 dolrecomp_overlay_bss_shift[];\n");
     }
     fprintf(header, "\n// Function entry points\n");
@@ -396,11 +425,11 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
         const Module* module = &groups[g];
         const FunctionAnalysis* analysis = &module->analysis;
         CallTable calls = {0};
-        ok = build_call_table(&calls, groups, g);
+        ok = build_call_table(&calls, groups, group_count, g);
         u32 order[MAX_GROUP_SECTIONS], starts[MAX_GROUP_SECTIONS], ends[MAX_GROUP_SECTIONS];
         if (ok) {
-            emit_set_function_table(calls.starts, calls.ends, g ? calls.ids : NULL,
-                                    g ? calls.tags : NULL, calls.count);
+            emit_set_function_table(calls.starts, calls.ends, calls.ids, calls.tags, calls.groups,
+                                    calls.count);
             emit_set_symbol_tag(module->tag);
             emit_set_entry_targets(module->entry_targets, module->entry_target_count);
             sort_sections(module, order);
@@ -408,9 +437,8 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
                 starts[s] = module->sections[order[s]].address;
                 ends[s] = starts[s] + module->sections[order[s]].size;
             }
-            if (g)
-                emit_set_overlay(g, starts, ends, module->section_count, module->ha_relocs,
-                                 module->ha_reloc_count);
+            emit_set_overlay(g, starts, ends, g ? module->section_count : 0u, module->ha_relocs,
+                             module->ha_reloc_count);
         }
         const u32 first_job = job_count;
         for (u32 s = 0; ok && s < module->section_count; s++) {
@@ -441,11 +469,11 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
         }
         if (ok) {
             const u32 group_jobs = job_count - first_job;
-            printf("writing %u %sfunctions in %u chunks with %u jobs\n", analysis->function_count,
-                   g ? "overlay " : "", group_jobs, effective_chunk_jobs(group_jobs, threads));
+            printf("writing %u functions%s%s in %u chunks with %u jobs\n", analysis->function_count,
+                   g ? " of " : "", g ? module->name : "", group_jobs, effective_chunk_jobs(group_jobs, threads));
             ok = run_chunk_jobs(jobs + first_job, group_jobs, threads);
         }
-        emit_set_function_table(NULL, NULL, NULL, NULL, 0);
+        emit_set_function_table(NULL, NULL, NULL, NULL, NULL, 0);
         emit_set_symbol_tag(NULL);
         emit_set_overlay(0, NULL, NULL, 0, NULL, 0);
         call_table_free(&calls);
@@ -527,7 +555,7 @@ static int compare_reloc(const void* left, const void* right) {
     return a->address < b->address ? -1 : a->address > b->address;
 }
 
-// What the emitter needs of an overlay's relocations: its address-highs, each
+// What the emitter needs of a group's relocations: its address-highs, each
 // of which must be an addis for the shift to land in its register.
 static int overlay_ha_relocs(Module* module) {
     module->ha_relocs = (EmitHaReloc*)malloc((module->reloc_count ? module->reloc_count : 1u) *
@@ -541,18 +569,18 @@ static int overlay_ha_relocs(Module* module) {
         const u8* word =
             section_bytes(module->sections, module->section_count, reloc->address, reloc->address + 4u);
         if (!word || read_be32(word) >> 26 != 15u || reloc->keep_mask != 0xFFFF0000u) {
-            fprintf(stderr, "error: %s: address-high at 0x%08X is not an addis\n", module->name,
-                    reloc->address);
+            fprintf(stderr, "error: %s: address-high at 0x%08X is not an addis\n",
+                    module->name ? module->name : "resident code", reloc->address);
             return 0;
         }
         module->ha_relocs[module->ha_reloc_count++] =
-            (EmitHaReloc){reloc->address, reloc->kind == LINKED_RELOC_HA_BSS};
+            (EmitHaReloc){reloc->address, reloc->kind == LINKED_RELOC_HA_BSS, reloc->target};
     }
     return 1;
 }
 
-// The C name tag of an overlay: its file name without the directory and
-// extension, as an identifier, then '_'.
+// The C name tag of a module of its own: its file name without the directory
+// and extension, as an identifier, then '_'.
 static void overlay_tag(char* tag, size_t size, const char* file) {
     const char* name = file;
     for (const char* p = file; *p; p++) {
@@ -568,18 +596,81 @@ static void overlay_tag(char* tag, size_t size, const char* file) {
     tag[n] = 0;
 }
 
+// The static module's section addresses by its section index, for a DOL of
+// the usual layout (2 text and 8 data sections): .init and .text, .ctors and
+// .dtors are left out (the game links nothing against them), .rodata, .data,
+// .bss, .sdata, .sdata2, and .sbss and .sbss2 where .sdata and .sdata2 end.
+static int static_sections_of(const DOLFile* dol, u32* sections, u32* count) {
+    const DOLHeader* h = &dol->header;
+    for (u32 i = 0; i < DOL_NUM_TEXT; i++) {
+        if ((i < 2) != (h->text_sizes[i] != 0))
+            return 0;
+    }
+    for (u32 i = 0; i < DOL_NUM_DATA; i++) {
+        if ((i < 8) != (h->data_sizes[i] != 0))
+            return 0;
+    }
+    const u32 layout[] = {0,
+                          h->text_addresses[0],
+                          h->text_addresses[1],
+                          0,
+                          0,
+                          h->data_addresses[4],
+                          h->data_addresses[5],
+                          h->bss_address,
+                          h->data_addresses[6],
+                          h->data_addresses[7],
+                          0,
+                          h->data_addresses[6] + h->data_sizes[6],
+                          h->data_addresses[7] + h->data_sizes[7]};
+    *count = sizeof(layout) / sizeof(layout[0]);
+    memcpy(sections, layout, sizeof(layout));
+    return 1;
+}
+
+// Where the DOL's image ends: its sections and bss.
+static u32 dol_end(const DOLFile* dol) {
+    const DOLHeader* h = &dol->header;
+    u32 end = h->bss_address + h->bss_size;
+    for (u32 i = 0; i < DOL_NUM_TEXT; i++) {
+        if (h->text_sizes[i] && h->text_addresses[i] + h->text_sizes[i] > end)
+            end = h->text_addresses[i] + h->text_sizes[i];
+    }
+    for (u32 i = 0; i < DOL_NUM_DATA; i++) {
+        if (h->data_sizes[i] && h->data_addresses[i] + h->data_sizes[i] > end)
+            end = h->data_addresses[i] + h->data_sizes[i];
+    }
+    return end;
+}
+
 int recompile(const RecompConfig* config, const char* game_dir, const char* out_dir) {
     char dol_path[1200];
     DOLFile dol;
     if (!join_path(dol_path, sizeof(dol_path), game_dir, config->dol) || !dol_load(&dol, dol_path))
         return 0;
 
-    const u32 group_count = 1u + config->rso_overlay_count;
-    Module* groups = (Module*)calloc(group_count, sizeof(Module));
-    ModuleLink link = {0};
-    if (!groups || (config->sel[0] && !rso_link(&link, config, game_dir)) || !rel_link(&link, config, game_dir)) {
-        free(groups);
-        module_link_free(&link);
+    u32 static_sections[RECOMP_MAX_STATIC_SECTIONS];
+    u32 static_section_count = config->static_section_count;
+    memcpy(static_sections, config->static_sections, sizeof(static_sections));
+    ModuleLink* link = (ModuleLink*)calloc(1, sizeof(ModuleLink));
+    int linked = link != NULL;
+    if (linked && config->sel[0] && !static_section_count &&
+        !static_sections_of(&dol, static_sections, &static_section_count)) {
+        fprintf(stderr, "error: the DOL's layout is not the usual one; give rso.static_sections\n");
+        linked = 0;
+    }
+    if (linked) {
+        link->arena = dol_end(&dol);
+        linked = (!config->sel[0] ||
+                  rso_link(link, config, game_dir, static_sections, static_section_count)) &&
+                 rel_link(link, config, game_dir);
+    }
+    const u32 group_count = linked && link->group_count ? link->group_count : 1u;
+    Module* groups = linked ? (Module*)calloc(group_count, sizeof(Module)) : NULL;
+    if (!groups) {
+        if (link)
+            module_link_free(link);
+        free(link);
         dol_free(&dol);
         return 0;
     }
@@ -597,36 +688,35 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     }
     int ok = 1;
     for (u32 g = 1; g < group_count; g++) {
-        groups[g].name = config->rso_overlays[g - 1u].file;
+        groups[g].where = link->groups[g - 1u];
+        groups[g].name = groups[g].where.file;
         overlay_tag(groups[g].tag, sizeof(groups[g].tag), groups[g].name);
     }
-    for (u32 i = 0; ok && i < link.count; i++) {
-        Module* module = &groups[link.text[i].group];
+    for (u32 i = 0; ok && i < link->count; i++) {
+        Module* module = &groups[link->text[i].group];
         if (module->section_count == MAX_GROUP_SECTIONS) {
             fprintf(stderr, "error: too many module text sections\n");
             ok = 0;
             break;
         }
         module->sections[module->section_count] = (LoadedCodeSection){
-            "text", link.text[i].module, link.text[i].bytes, module->section_count, 0,
-            link.text[i].address, link.text[i].size, EMBEDDED_DATA_DOL};
+            "text", link->text[i].module, link->text[i].bytes, module->section_count, 0,
+            link->text[i].address, link->text[i].size, EMBEDDED_DATA_DOL};
         module->section_count++;
     }
 
-    if (link.reloc_count)
-        qsort(link.relocs, link.reloc_count, sizeof(LinkedReloc), compare_reloc);
-    for (u32 i = 0; ok && i < link.reloc_count;) {
-        Module* module = &groups[link.relocs[i].group];
+    if (link->reloc_count)
+        qsort(link->relocs, link->reloc_count, sizeof(LinkedReloc), compare_reloc);
+    for (u32 i = 0; ok && i < link->reloc_count;) {
+        Module* module = &groups[link->relocs[i].group];
         u32 end = i;
-        while (end < link.reloc_count && link.relocs[end].group == link.relocs[i].group)
+        while (end < link->reloc_count && link->relocs[end].group == link->relocs[i].group)
             end++;
-        module->relocs = link.relocs + i;
+        module->relocs = link->relocs + i;
         module->reloc_count = end - i;
         ok = overlay_ha_relocs(module);
         i = end;
     }
-    for (u32 g = 1; g < group_count; g++)
-        groups[g].where = link.overlays[g - 1u];
 
     DolRecompNativeList natives = {0};
     NativeSignatures signatures = {0};
@@ -647,41 +737,44 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
          join_path(natives_list, sizeof(natives_list), out_dir, "natives.txt") && make_dir_tree(out_dir) &&
          natives_write_header(&natives, natives_header) && natives_write_list(&natives, natives_list);
     if (ok) {
-        data = (GuestRegion*)malloc((DOL_NUM_DATA + link.data_count + 1u) * sizeof(GuestRegion));
-        seeds = (u32*)malloc((1u + link.entry_count + natives.count) * sizeof(u32));
+        data = (GuestRegion*)malloc((DOL_NUM_DATA + link->data_count + 1u) * sizeof(GuestRegion));
+        seeds = (u32*)malloc((1u + link->entry_count + natives.count) * sizeof(u32));
         ok = data && seeds;
     }
 
     u32 first_id = 0;
     for (u32 g = 0; ok && g < group_count; g++) {
         Module* module = &groups[g];
-        // Code pointers live in the group's data: the DOL's for the resident
-        // group, with the resident modules', and each overlay's own.
+        // Code pointers live in the data of the code loaded with the group's:
+        // the DOL's and every resident module's for resident code, an
+        // overlay's own for an overlay.
+        const bool resident = g == 0 || !module->where.overlay;
         u32 data_count = 0, seed_count = 0;
-        if (g == 0) {
-            for (int i = 0; i < DOL_NUM_DATA; i++) {
-                if (dol.header.data_sizes[i])
-                    data[data_count++] = (GuestRegion){dol.header.data_addresses[i], dol.header.data_sizes[i],
-                                                       dol_get_data_section(&dol, i)};
-            }
+        for (int i = 0; resident && i < DOL_NUM_DATA; i++) {
+            if (dol.header.data_sizes[i])
+                data[data_count++] = (GuestRegion){dol.header.data_addresses[i], dol.header.data_sizes[i],
+                                                   dol_get_data_section(&dol, i)};
+        }
+        if (g == 0)
             seeds[seed_count++] = dol.header.entry_point;
-        }
         const u32 dol_data = data_count;
-        for (u32 i = 0; i < link.data_count; i++) {
-            if (link.data[i].group == g)
-                data[data_count++] = (GuestRegion){link.data[i].address, link.data[i].size, link.data[i].bytes};
+        for (u32 i = 0; i < link->data_count; i++) {
+            const u32 owner = link->data[i].group;
+            if (owner == g || (resident && (owner == 0 || !groups[owner].where.overlay)))
+                data[data_count++] =
+                    (GuestRegion){link->data[i].address, link->data[i].size, link->data[i].bytes};
         }
-        for (u32 i = 0; i < link.entry_count; i++) {
-            if (link.entries[i].group == g)
-                seeds[seed_count++] = link.entries[i].address;
+        for (u32 i = 0; i < link->entry_count; i++) {
+            if (link->entries[i].group == g)
+                seeds[seed_count++] = link->entries[i].address;
         }
         for (u32 i = 0; g == 0 && i < natives.count; i++)
             seeds[seed_count++] = natives.entries[i].address;
         ok = load_module(module, data, data_count, seeds, seed_count);
         // The resident entry targets come from the DOL's data alone.
         module->entry_targets =
-            ok ? collect_entry_targets(g == 0 ? dol.header.entry_point : 0, g == 0 ? data : data + dol_data,
-                                       g == 0 ? dol_data : data_count - dol_data, module->sections,
+            ok ? collect_entry_targets(g == 0 ? dol.header.entry_point : 0, resident ? data : data + dol_data,
+                                       resident ? dol_data : data_count - dol_data, module->sections,
                                        module->section_count, &module->entry_target_count)
                : NULL;
         ok = ok && module->entry_targets;
@@ -709,7 +802,8 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     free(seeds);
     natives_free(&natives);
     natives_signatures_free(&signatures);
-    module_link_free(&link);
+    module_link_free(link);
+    free(link);
     dol_free(&dol);
     return ok;
 }

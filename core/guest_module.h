@@ -22,22 +22,26 @@ typedef struct GuestRange
 // pc. It leaves the pc alone with no cycles charged if it has no entry there.
 typedef void (*GuestCode)(CPUState* ctx);
 
-// A word of an overlay's code whose bits outside keep_mask depend on where
-// the module loads.
+// A word of code whose bits outside keep_mask depend on where a module
+// loads.
 typedef struct GuestReloc
 {
     u32 address;
     u32 keep_mask;
 } GuestReloc;
 
-// A module the game loads at times into memory other code uses at other
-// times: its functions overlap the resident ones and the other overlays'.
-// Its code was compiled for one place (the file at base, its bss at bss) and
-// runs wherever the game loads it, given the shifts below; every address
-// here is a compiled one.
+// A module whose code was compiled for one place (the file at base, its bss
+// at bss) and runs wherever the game loads it, given the shifts below; every
+// address here is a compiled one. An overlay, which the game loads at times
+// into memory other code uses at other times, has functions overlapping
+// others'; a resident module given no place in the game's config is one too.
+// The runtime finds where the game linked it: an RSO module by the name in
+// the RSO list (name's file name without extension), a REL module by its id
+// in the OS module list.
 typedef struct GuestOverlay
 {
     const char* name;
+    u32 rel_id;  // 0 for an RSO module
     const GuestRange* code_ranges;  // sorted, non-overlapping
     u32 num_code_ranges;
     // Its functions' slice of the module's, tiling its code ranges.
@@ -68,13 +72,18 @@ typedef struct GuestModule
     u32 num_functions;
     const GuestOverlay* overlays;
     u32 num_overlays;
+    // The resident code's words that depend on where an overlay loads (calls
+    // and addresses into one), sorted.
+    const GuestReloc* relocs;
+    u32 num_relocs;
 } GuestModule;
 
 extern const GuestModule g_guest_module;
 
 // Overlay k's code runs as loaded at its base + dolrecomp_overlay_shift[k],
 // its bss at bss + dolrecomp_overlay_bss_shift[k]. The host runtime's to set,
-// while none of the overlay's functions counts as verified.
+// while none of the functions with code depending on them counts as
+// verified.
 extern u32 dolrecomp_overlay_shift[];
 extern u32 dolrecomp_overlay_bss_shift[];
 

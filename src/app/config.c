@@ -29,11 +29,12 @@ static int read_u32(toml_datum_t value, u32* out, const char* key) {
     return 1;
 }
 
-// A table's `<list> = [{ file, base, bss }, ...]`; base may be left out where
-// the modules have a placement rule.
-static int load_modules(const toml_table_t* table, const char* name, const char* list,
-                        bool placed_by_rule, RecompModule* out, u32* count) {
+// A table's `<list> = [{ file, base, bss }, ...]`, if it has one.
+static int load_modules(const toml_table_t* table, const char* name, const char* list, RecompModule* out,
+                        u32* count) {
     char key[64];
+    if (!toml_key_exists(table, list))
+        return 1;
     const toml_array_t* modules = toml_array_in(table, list);
     const int module_count = modules ? toml_array_nelem(modules) : -1;
     if (module_count <= 0 || (u32)module_count > RECOMP_MAX_MODULES) {
@@ -50,8 +51,7 @@ static int load_modules(const toml_table_t* table, const char* name, const char*
             return 0;
         module->base = 0;
         snprintf(key, sizeof(key), "%s.%s.base", name, list);
-        if ((!placed_by_rule || toml_key_exists(entry, "base")) &&
-            !read_u32(toml_int_in(entry, "base"), &module->base, key))
+        if (toml_key_exists(entry, "base") && !read_u32(toml_int_in(entry, "base"), &module->base, key))
             return 0;
         module->bss = 0;
         snprintf(key, sizeof(key), "%s.%s.bss", name, list);
@@ -67,9 +67,9 @@ static int load_rso(RecompConfig* config, const toml_table_t* rso) {
         return 0;
 
     const toml_array_t* sections = toml_array_in(rso, "static_sections");
-    const int section_count = sections ? toml_array_nelem(sections) : -1;
-    if (section_count <= 0 || (u32)section_count > RECOMP_MAX_STATIC_SECTIONS) {
-        fprintf(stderr, "error: config rso.static_sections needs 1..%u addresses\n",
+    const int section_count = sections ? toml_array_nelem(sections) : 0;
+    if (section_count < 0 || (u32)section_count > RECOMP_MAX_STATIC_SECTIONS) {
+        fprintf(stderr, "error: config rso.static_sections holds up to %u addresses\n",
                 RECOMP_MAX_STATIC_SECTIONS);
         return 0;
     }
@@ -79,13 +79,11 @@ static int load_rso(RecompConfig* config, const toml_table_t* rso) {
             return 0;
     }
     config->static_section_count = (u32)section_count;
-    const bool heap = toml_key_exists(rso, "overlay_heap_top");
-    if (heap && !read_u32(toml_int_in(rso, "overlay_heap_top"), &config->rso_overlay_heap_top,
-                          "rso.overlay_heap_top"))
+    if (toml_key_exists(rso, "overlay_heap_top") &&
+        !read_u32(toml_int_in(rso, "overlay_heap_top"), &config->rso_overlay_heap_top, "rso.overlay_heap_top"))
         return 0;
-    return load_modules(rso, "rso", "modules", false, config->rso_modules, &config->rso_module_count) &&
-           (!toml_key_exists(rso, "overlays") ||
-            load_modules(rso, "rso", "overlays", heap, config->rso_overlays, &config->rso_overlay_count));
+    return load_modules(rso, "rso", "modules", config->rso_modules, &config->rso_module_count) &&
+           load_modules(rso, "rso", "overlays", config->rso_overlays, &config->rso_overlay_count);
 }
 
 // A file the config names: relative to the config file unless absolute.
@@ -195,7 +193,8 @@ int config_load(RecompConfig* config, const char* path) {
     const toml_table_t* rel = toml_table_in(root, "rel");
     const toml_table_t* defines = toml_table_in(root, "defines");
     ok = (!rso || load_rso(config, rso)) &&
-         (!rel || load_modules(rel, "rel", "modules", false, config->rel_modules, &config->rel_module_count)) &&
+         (!rel || (load_modules(rel, "rel", "modules", config->rel_modules, &config->rel_module_count) &&
+                   load_modules(rel, "rel", "overlays", config->rel_overlays, &config->rel_overlay_count))) &&
          (!defines || load_defines(config, defines));
 
 done:

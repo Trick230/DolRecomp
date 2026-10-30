@@ -13,8 +13,6 @@
 } while (0)
 
 enum {
-    R_PPC_ADDR32 = 1,
-    R_PPC_REL24 = 10,
     R_DOLPHIN_SECTION = 202,
     R_DOLPHIN_END = 203,
 };
@@ -163,8 +161,67 @@ static int test_link(void) {
     return 1;
 }
 
+static const LinkedReloc* reloc_at(const ModuleLink* link, u32 group, u32 address) {
+    for (u32 i = 0; i < link->reloc_count; i++) {
+        if (link->relocs[i].group == group && link->relocs[i].address == address)
+            return &link->relocs[i];
+    }
+    return NULL;
+}
+
+#define ARENA 0x80700000u
+
+// Module 1 with no base is a group of its own in the arena, its bss after
+// it; its calls out depend on where it loads. Module 2 as an overlay with no
+// base is compiled for the end of MEM1.
+static int test_groups(void) {
+    CHECK(write_a("test_link_a.rel", 1) && write_b("test_link_b.rel"), "can't write the RELs");
+    RecompConfig config;
+    memset(&config, 0, sizeof(config));
+    place(&config, 0, "test_link_a.rel", 0, 0);
+    place(&config, 1, "test_link_b.rel", B_BASE, 0);
+    config.rel_module_count = 2;
+
+    ModuleLink link = {0};
+    link.arena = ARENA;
+    CHECK(rel_link(&link, &config, "."), "rel_link failed");
+    CHECK(link.group_count == 2 && link.groups[0].rel_id == 1 && !link.groups[0].overlay &&
+              link.groups[0].base == ARENA && link.groups[0].bss == ARENA + 0x1C0u && link.groups[0].bss_section == 3,
+          "module 1: group of %u, at 0x%08X, bss 0x%08X", link.group_count, link.groups[0].base,
+          link.groups[0].bss);
+    const LinkedSection* text = NULL;
+    for (u32 i = 0; i < link.count; i++) {
+        if (link.text[i].group == 1)
+            text = &link.text[i];
+    }
+    CHECK(text && text->address == ARENA + 0x100u, "module 1's text");
+    CHECK(branch_target(text->bytes, text->address) == B_BASE + 0x100, "call into module 2");
+    const LinkedReloc* calls[] = {reloc_at(&link, 1, ARENA + 0x100u), reloc_at(&link, 1, ARENA + 0x104u)};
+    CHECK(calls[0] && calls[1] && calls[0]->keep_mask == 0xFC000003u, "its calls out depend on where it loads");
+    for (u32 i = 0; i < link.entry_count; i++) {
+        CHECK(link.entries[i].group == (link.entries[i].address == ARENA + 0x108u ? 1u : 0u),
+              "entry 0x%08X in group %u", link.entries[i].address, link.entries[i].group);
+    }
+    module_link_free(&link);
+
+    config.rel_module_count = 1;
+    config.rel_overlays[0] = config.rel_modules[1];
+    config.rel_overlays[0].base = 0;
+    config.rel_overlay_count = 1;
+    link = (ModuleLink){0};
+    link.arena = ARENA;
+    CHECK(rel_link(&link, &config, "."), "rel_link with an overlay failed");
+    CHECK(link.group_count == 3 && link.groups[1].overlay && link.groups[1].rel_id == 2 &&
+              link.groups[1].base == LINK_OVERLAY_TOP - 0x120u,
+          "overlay at 0x%08X", link.groups[1].base);
+    module_link_free(&link);
+    remove("test_link_a.rel");
+    remove("test_link_b.rel");
+    return 1;
+}
+
 int main(void) {
-    if (!test_link())
+    if (!test_link() || !test_groups())
         return 1;
     printf("REL link tests passed\n");
     return 0;

@@ -20,10 +20,12 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 // The functions code being written can call, sorted: a call to one is a
 // direct C call guarded by its dolrecomp_direct_ok flag. ids gives each one's
 // index in the runtime's function table (NULL: its index here), tags the tag
-// its C names carry (NULL or a NULL entry: none). Call before worker emission;
-// passing count == 0 sends every call back to the runtime.
+// its C names carry (NULL or a NULL entry: none), groups the group of the
+// module holding it (NULL or 0: one that runs where it was compiled; see
+// emit_set_overlay). Call before worker emission; passing count == 0 sends
+// every call back to the runtime.
 void emit_set_function_table(const u32* starts, const u32* ends, const u32* ids,
-                             const char* const* tags, u32 count);
+                             const char* const* tags, const u32* groups, u32 count);
 
 // The tag of the functions being written: an overlay's functions share
 // addresses with other modules', so their C names (func_<tag><address>) carry
@@ -52,15 +54,18 @@ void emit_set_natives(const DolRecompNative* natives, u32 count);
 // Requires `out` to be readable back (opened "w+").
 void emit_set_entry_targets(const u32* targets, u32 count);
 
-// The code being written is overlay `index` (from 1; 0 for resident code),
-// compiled at one address and run wherever the game loads it: addresses in its
-// code ranges come out as that plus dolrecomp_overlay_shift[index - 1], and
-// the lis of each address-high relocation in `relocs` (sorted) adds the shift
-// of its target, the module's or its bss's (dolrecomp_overlay_bss_shift).
-// Same lifetime rules as the function table.
+// The code being written is group `index`'s: a module compiled at one address
+// and run wherever the game loads it (from 1), or 0 for the code that runs
+// where it was compiled. Addresses in group g's code come out as that plus
+// dolrecomp_overlay_shift[g - 1]: in its own code ranges, and in the
+// functions of other groups it calls. The lis of each address-high
+// relocation in `relocs` (sorted) adds the shift of its target group, of the
+// module or its bss (dolrecomp_overlay_bss_shift). Same lifetime rules as the
+// function table.
 typedef struct {
     u32 address;
     bool bss;
+    u32 group;
 } EmitHaReloc;
 void emit_set_overlay(u32 index, const u32* range_starts, const u32* range_ends, u32 range_count,
                       const EmitHaReloc* relocs, u32 reloc_count);

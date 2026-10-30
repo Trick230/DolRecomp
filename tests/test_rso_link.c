@@ -13,16 +13,12 @@
     } \
 } while (0)
 
-enum {
-    R_PPC_ADDR32 = 1,
-    R_PPC_REL24 = 10,
-};
-
 #define STATIC_TEXT 0x80004000u
 #define RESIDENT_BASE 0x80010000u
 #define OVERLAY_BASE 0x80020000u
 #define OVERLAY_BSS 0x8001FF00u
 #define HEAP_TOP 0x80030000u
+#define ARENA 0x80100000u
 #define BSS_SIZE 0x24u
 
 // Every module has the same layout: the header, a table of sections 1 text
@@ -165,7 +161,9 @@ static int test_link(void) {
     RecompConfig config;
     configure(&config);
     ModuleLink link = {0};
-    CHECK(rso_link(&link, &config, "."), "rso_link failed");
+    CHECK(rso_link(&link, &config, ".", config.static_sections, config.static_section_count), "rso_link failed");
+    CHECK(link.group_count == 3 && link.groups[0].overlay && link.groups[1].overlay, "%u groups",
+          link.group_count);
     CHECK(link.count == 3, "%u text sections", link.count);
     const u32 heap_base = HEAP_TOP - FILE_SIZE;
     const u32 heap_bss = heap_base - 0x40u;  // round32(0x24 + 0x10)
@@ -191,9 +189,47 @@ static int test_link(void) {
           "resident exports");
     module_link_free(&link);
 
-    // An overlay with neither a base nor the heap rule can't be placed.
+    // An overlay with neither a base nor the heap rule is compiled for the end
+    // of MEM1.
     config.rso_overlay_heap_top = 0;
-    CHECK(!rso_link(&link, &config, "."), "an overlay with no base linked");
+    CHECK(rso_link(&link, &config, ".", config.static_sections, config.static_section_count) &&
+              link.text[2].address == LINK_OVERLAY_TOP - FILE_SIZE + 0x100,
+          "an overlay with no base at 0x%08X", link.text[2].address);
+    module_link_free(&link);
+    return 1;
+}
+
+static const LinkedReloc* reloc_at(const ModuleLink* link, u32 group, u32 address) {
+    for (u32 i = 0; i < link->reloc_count; i++) {
+        if (link->relocs[i].group == group && link->relocs[i].address == address)
+            return &link->relocs[i];
+    }
+    return NULL;
+}
+
+// A resident module the config gives no base is a group of its own in the
+// arena; the overlays' calls into it depend on where it loads.
+static int test_own_group(void) {
+    RecompConfig config;
+    configure(&config);
+    config.rso_modules[0].base = 0;
+    ModuleLink link = {0};
+    link.arena = ARENA + 4u;
+    CHECK(rso_link(&link, &config, ".", config.static_sections, config.static_section_count), "rso_link failed");
+    CHECK(link.group_count == 4 && !link.groups[0].overlay && link.groups[0].base == ARENA + 0x20u &&
+              link.groups[0].rel_id == 0 && link.groups[1].overlay,
+          "resident group at 0x%08X", link.groups[0].base);
+    CHECK(link.text[0].group == 1 && link.text[0].address == ARENA + 0x120u, "resident text");
+    CHECK(has_entry(&link, 1, ARENA + 0x124u) && !has_entry(&link, 0, ARENA + 0x124u), "its export");
+    for (u32 g = 2; g < 4; g++) {
+        const LinkedSection* text = &link.text[g - 1u];
+        CHECK(text->group == g && branch_target(text->bytes + 4, text->address + 4) == ARENA + 0x124u,
+              "overlay %u: call to g", g);
+        const LinkedReloc* call = reloc_at(&link, g, text->address + 4);
+        CHECK(call && call->keep_mask == 0xFC000003u && call->kind == LINKED_RELOC_PLAIN,
+              "overlay %u: its call to g depends on where both load", g);
+        CHECK(reloc_at(&link, g, text->address), "overlay %u: its call into the static module", g);
+    }
     module_link_free(&link);
     return 1;
 }
@@ -222,7 +258,7 @@ static int test_locate(void) {
 int main(void) {
     const int written = write_sel("test_rso.sel") && write_resident("test_rso_resident.rso") &&
                         write_overlay("test_rso_overlay.rso");
-    const int ok = written && test_link() && test_locate();
+    const int ok = written && test_link() && test_own_group() && test_locate();
     remove("test_rso.sel");
     remove("test_rso_resident.rso");
     remove("test_rso_overlay.rso");

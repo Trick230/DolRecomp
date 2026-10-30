@@ -101,8 +101,9 @@ static void emit_xform_ea(FILE* out, u8 ra, u8 rb, bool update) {
     }
 }
 
-// The overlay being written (from 1; 0 for resident code), its code ranges
-// and the address-high relocations of its lis instructions, sorted.
+// The group being written (from 1; 0 for code that runs where it was
+// compiled), its code ranges and the address-high relocations of its lis
+// instructions, sorted.
 static u32 g_overlay = 0;
 static const u32* g_overlay_starts = NULL;
 static const u32* g_overlay_ends = NULL;
@@ -129,13 +130,18 @@ static bool in_overlay_code(u32 address) {
     return false;
 }
 
-// A guest code address as C: an overlay's own run where the game loaded it.
+static s32 function_index_for(u32 addr);
+static u32 function_group(s32 index);
+
+// A guest code address as C: one in a module of its own group runs where the
+// game loaded that.
 static const char* code_address(u32 address) {
     static _Thread_local char text[8][48];
     static _Thread_local u32 next;
     char* out = text[next++ & 7u];
-    if (g_overlay && in_overlay_code(address))
-        snprintf(out, sizeof(text[0]), "(0x%08Xu + dolrecomp_overlay_shift[%u])", address, g_overlay - 1u);
+    const u32 group = g_overlay && in_overlay_code(address) ? g_overlay : function_group(function_index_for(address));
+    if (group)
+        snprintf(out, sizeof(text[0]), "(0x%08Xu + dolrecomp_overlay_shift[%u])", address, group - 1u);
     else
         snprintf(out, sizeof(text[0]), "0x%08Xu", address);
     return out;
@@ -165,7 +171,7 @@ static const char* ha_shift(u32 address) {
     if (lo == g_ha_reloc_count || g_ha_relocs[lo].address != address)
         return "";
     snprintf(text, sizeof(text), " + dolrecomp_overlay_%sshift[%u]", g_ha_relocs[lo].bss ? "bss_" : "",
-             g_overlay - 1u);
+             g_ha_relocs[lo].group - 1u);
     return text;
 }
 
@@ -384,15 +390,17 @@ static const u32* g_function_starts = NULL;
 static const u32* g_function_ends = NULL;
 static const u32* g_function_ids = NULL;
 static const char* const* g_function_tags = NULL;
+static const u32* g_function_groups = NULL;
 static u32 g_function_count = 0;
 static const char* g_symbol_tag = "";
 
 void emit_set_function_table(const u32* starts, const u32* ends, const u32* ids,
-                             const char* const* tags, u32 count) {
+                             const char* const* tags, const u32* groups, u32 count) {
     g_function_starts = count ? starts : NULL;
     g_function_ends = count ? ends : NULL;
     g_function_ids = count ? ids : NULL;
     g_function_tags = count ? tags : NULL;
+    g_function_groups = count ? groups : NULL;
     g_function_count = count ? count : 0;
 }
 
@@ -406,6 +414,10 @@ static u32 function_id(s32 index) {
 
 static const char* function_tag(s32 index) {
     return g_function_tags && g_function_tags[index] ? g_function_tags[index] : "";
+}
+
+static u32 function_group(s32 index) {
+    return index >= 0 && g_function_groups ? g_function_groups[index] : 0;
 }
 
 static const DolRecompNative* g_natives = NULL;

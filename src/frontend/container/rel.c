@@ -354,7 +354,10 @@ bool rel_apply_relocations(RELFile* rel, const RELModuleMap* modules) {
                 !section_address_at(rel, current_section_index, current_offset,
                                     &patch_address) ||
                 !apply_relocation(patch_section, current_offset, patch_address,
-                                  type, target)) {
+                                  type, target) ||
+                (modules && modules->visit &&
+                 !modules->visit(modules->user, rel, patch_section, patch_address, type,
+                                 import_module, import_module ? section_index : 0u, target))) {
                 return false;
             }
             rel->relocation_count++;
@@ -549,7 +552,7 @@ bool rel_load(RELFile* rel, const char* path, u32 base_address) {
         return false;
 
     RELModuleMapEntry self_entry = { rel->module_id, rel };
-    RELModuleMap map = { &self_entry, 1, false };
+    RELModuleMap map = { &self_entry, 1, false, NULL, NULL };
     if (!rel_apply_relocations(rel, &map)) {
         rel_free(rel);
         return false;

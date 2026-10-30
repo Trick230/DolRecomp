@@ -57,27 +57,38 @@ dolrecomp --setup     # download Wiimms ISO Tools for extract
 ```
 
 The config names the DOL, the console's CPU (`cpu = "gekko"` or
-`"broadway"`), the natives' signature sets and the modules with
-the addresses they load at (and their bss): RSO modules (`[rso]`), linked
-against the static module's exports, and REL modules (`[rel]`), linked
-against the DOL and each other as `OSLink` does, with imports of a module not
-listed left as in the file. Their code is recompiled with the DOL's.
-A module's `file` may run through archives, as in
+`"broadway"`), the natives' signature sets and the modules: RSO modules
+(`[rso]`), linked against the static module's exports, and REL modules
+(`[rel]`), linked against the DOL and each other as `OSLink` does, with
+imports of a module not listed left as in the file. Their code is recompiled
+with the DOL's. A module's `file` may run through archives, as in
 `files/RELS.szs/rels/stage.rel`: RARC and U8 archives, and Yaz0 compression
 of the archive or the file, are read as the game reads them.
-RSO overlays (`[rso] overlays`) are modules the game loads at times into
-memory other code uses at other times, like one stage after another: each
-links against the resident modules alone and gets functions of its own
+
+A config needs no addresses. A module is resident (`modules`) or an overlay
+(`overlays`), which the game loads at times into memory other code uses at
+other times, like one stage after another: each overlay links against the
+resident modules alone and gets functions of its own
 (`func_<module>_<address>`) next to the ones it overlaps; the runtime runs, of
-the functions over a pc, the one whose hash matches guest RAM. An overlay
-can leave its address to `overlay_heap_top`: the SDK's expanded heap hands
-out its file and bss from the tail of the free space ending there. That
-address is only where it is compiled for: its code runs wherever the game
-links it. Addresses in its own code come out as the compiled ones plus
-`dolrecomp_overlay_shift[k]`, and each `lis` of an address in the module
-adds the shift of the module or of its bss. Its function hashes leave out
-the instruction bits its placement changes (`GuestOverlay.relocs`). The
-runtime reads where the game linked each overlay and sets the shifts.
+the functions over a pc, the one whose hash matches guest RAM. Every overlay,
+and every resident module the config gives no `base`, is compiled for one
+place and runs wherever the game links it: addresses in its code come out as
+the compiled ones plus `dolrecomp_overlay_shift[k]`, each `lis` of an address
+in a module of its own adds that module's shift (or its bss's), and calls
+between modules land where the callee loaded. Function hashes leave out the
+instruction bits a placement changes (`GuestOverlay.relocs`, and
+`GuestModule.relocs` for the code that runs where it was compiled). The
+runtime reads where the game linked each module, an RSO module from the RSO
+list by name and a REL module from the OS's module list by id, and sets the
+shifts. A resident module's `base` (and `bss`), where the game always loads
+it, is optional: its code then runs where it was compiled. That costs or
+saves nothing measurable (NiGHTS' forest at 613% either way), but where a
+module is compiled moves which data words read as code pointers, so function
+boundaries, and with them where guest time is charged, can differ a little
+between the two; a config keeps whichever placement its reference runs were
+made with.
+`rso.static_sections` can be left out for a DOL of the usual layout (2 text
+and 8 data sections).
 Constants of the game's own its runtime compiles against (`[defines]`, such
 as an idle loop's address) go to `ppc_natives.h` with the natives' defines.
 `src/app/config.h` shows the format. DualizeRecomp's is

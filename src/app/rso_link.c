@@ -7,15 +7,6 @@
 
 #define SECTION_ABSOLUTE 0xFFF1u  // SHN_ABS
 
-enum {
-    R_PPC_ADDR32 = 1,
-    R_PPC_ADDR16_LO = 4,
-    R_PPC_ADDR16_HI = 5,
-    R_PPC_ADDR16_HA = 6,
-    R_PPC_REL24 = 10,
-    R_PPC_REL14 = 11,
-};
-
 typedef struct {
     u8* data;
     u32 size;
@@ -37,12 +28,15 @@ typedef struct {
     RsoHeader header;
     u32 base, bss;  // where it loads
     u32* section_address;
+    u32 group;
 } Module;
 
 typedef struct {
     const char* name;
     u32 address;
     u32 order;
+    u32 group;
+    bool bss;
 } Export;
 
 static int fits(const Bytes* b, u64 offset, u64 size) {
@@ -139,7 +133,8 @@ static int compare_export(const void* a, const void* b) {
     return ((const Export*)a)->order < ((const Export*)b)->order ? 1 : -1;
 }
 
-static int add_export(Export** exports, u32* count, u32* capacity, const char* name, u32 address) {
+static int add_export(Export** exports, u32* count, u32* capacity, const char* name, u32 address, u32 group,
+                      bool bss) {
     if (*count == *capacity) {
         const u32 grown = *capacity ? *capacity * 2u : 1024u;
         Export* resized = (Export*)realloc(*exports, grown * sizeof(Export));
@@ -148,7 +143,7 @@ static int add_export(Export** exports, u32* count, u32* capacity, const char* n
         *exports = resized;
         *capacity = grown;
     }
-    (*exports)[*count] = (Export){name, address, *count};
+    (*exports)[*count] = (Export){name, address, *count, group, bss};
     ++*count;
     return 1;
 }
@@ -170,30 +165,37 @@ static int load_module(Module* module, const char* file, const char* game_dir) {
     return 0;
 }
 
-// Where a module the config gives no base loads (see app/config.h): the file,
-// then the bss, from the tail of the expanded heap's free space ending at top.
+// Where an overlay the config gives no base loads (see app/config.h): the
+// file, then the bss, from the tail of the expanded heap's free space ending
+// at top.
 static void place_on_heap(Module* module, u32 top) {
     module->base = top - round32(module->file.size);
     module->bss = module->header.bss_size ? module->base - round32(module->header.bss_size + 0x10u) : 0;
 }
 
-// Reads a module and places its sections where the config, or with no base
-// there the heap rule, says it loads.
-static int place_module(Module* module, const RecompModule* placed, u32 heap_top, const char* game_dir) {
+// Reads a module and places its sections where the config says it loads. With
+// no base there, it is a group of its own, compiled for the heap rule if an
+// overlay, or the link's arena if resident; so is an overlay with one.
+static int place_module(ModuleLink* link, Module* module, const RecompModule* placed, bool overlay, u32 heap_top,
+                        const char* game_dir) {
     if (!load_module(module, placed->file, game_dir))
         return 0;
+    const RsoHeader* h = &module->header;
     module->base = placed->base;
     module->bss = placed->bss;
-    if (placed->base == 0 && heap_top)
-        place_on_heap(module, heap_top);
-    if (module->base == 0) {
-        fprintf(stderr, "error: %s needs a base in the config\n", placed->file);
+    if (placed->base == 0 && overlay) {
+        place_on_heap(module, heap_top ? heap_top : LINK_OVERLAY_TOP);
+    } else if (placed->base == 0) {
+        module->base = module_link_place(link, module->file.size);
+        module->bss = h->bss_size ? module_link_place(link, h->bss_size) : 0;
+    } else if (!overlay && (!module_link_reserve(link, module->base, module->file.size) ||
+                            (module->bss && !module_link_reserve(link, module->bss, h->bss_size)))) {
         return 0;
     }
-    const RsoHeader* h = &module->header;
     module->section_address = (u32*)calloc(h->section_count ? h->section_count : 1u, sizeof(u32));
     if (!module->section_address)
         return 0;
+    u32 bss_section = ~0u;
     for (u32 i = 0; i < h->section_count; i++) {
         const u8* table = module->file.data + h->section_table + i * 8u;
         const u32 offset = read_be32(table) & ~1u;
@@ -207,12 +209,20 @@ static int place_module(Module* module, const RecompModule* placed, u32 heap_top
                 return 0;
             }
             module->section_address[i] = module->bss;
+            bss_section = i;
         }
+    }
+    module->group = 0;
+    if (overlay || placed->base == 0) {
+        const LinkedGroup group = {placed->file, 0, overlay, module->base, module->bss, bss_section};
+        module->group = module_link_add_group(link, &group);
+        if (!module->group)
+            return 0;
     }
     return 1;
 }
 
-typedef int (*ExportVisitor)(void* user, const char* name, u32 address);
+typedef int (*ExportVisitor)(void* user, const Module* module, const char* name, u32 address, bool bss);
 
 // Calls visit for each of a placed module's exports.
 static int visit_exports(const Module* module, ExportVisitor visit, void* user) {
@@ -220,9 +230,11 @@ static int visit_exports(const Module* module, ExportVisitor visit, void* user) 
     for (u32 i = 0; i + 16u <= h->exports_size; i += 16u) {
         const u8* entry = module->file.data + h->exports + i;
         const u32 section = read_be32(entry + 8);
-        if (section < h->section_count &&
-            !visit(user, cstring(&module->file, h->export_names + read_be32(entry)),
-                   module->section_address[section] + read_be32(entry + 4)))
+        if (section >= h->section_count)
+            continue;
+        const u32 start = module->section_address[section];
+        if (!visit(user, module, cstring(&module->file, h->export_names + read_be32(entry)),
+                   start + read_be32(entry + 4), module->bss && start == module->bss))
             return 0;
     }
     return 1;
@@ -234,20 +246,15 @@ typedef struct {
     u32 capacity;
 } ExportList;
 
-static int add_to_exports(void* user, const char* name, u32 address) {
+static int add_to_exports(void* user, const Module* module, const char* name, u32 address, bool bss) {
     ExportList* list = (ExportList*)user;
-    return add_export(&list->exports, &list->count, &list->capacity, name, address);
+    return add_export(&list->exports, &list->count, &list->capacity, name, address, module->group, bss);
 }
 
-typedef struct {
-    ModuleLink* link;
-    u32 group;
-} EntryList;
-
-static int add_to_entries(void* user, const char* name, u32 address) {
+static int add_to_entries(void* user, const Module* module, const char* name, u32 address, bool bss) {
     (void)name;
-    EntryList* list = (EntryList*)user;
-    return module_link_add_entry(list->link, list->group, address);
+    (void)bss;
+    return module_link_add_entry((ModuleLink*)user, module->group, address);
 }
 
 static bool code_section(const RsoHeader* h, u32 index) {
@@ -266,41 +273,9 @@ static bool in_code(const Module* module, u32 offset) {
     return false;
 }
 
-// Notes a relocation of an overlay's code that its placement changes: an
-// absolute one to the module's own sections (into its bss or not), or a
-// relative one out of it.
-static int note_reloc(ModuleLink* link, u32 group, const Module* module, u32 offset, u8 type, bool internal,
-                      bool to_bss) {
-    if (group == 0 || !in_code(module, offset))
-        return 1;
-    LinkedReloc reloc = {group, module->base + (offset & ~3u), 0, LINKED_RELOC_PLAIN};
-    switch (type) {
-    case R_PPC_ADDR16_LO:
-    case R_PPC_ADDR16_HI:
-    case R_PPC_ADDR16_HA:
-        if (!internal)
-            return 1;
-        reloc.keep_mask = offset & 2u ? 0xFFFF0000u : 0x0000FFFFu;
-        if (type != R_PPC_ADDR16_LO)
-            reloc.kind = to_bss ? LINKED_RELOC_HA_BSS : LINKED_RELOC_HA_MODULE;
-        break;
-    case R_PPC_REL24:
-    case R_PPC_REL14:
-        if (internal)
-            return 1;
-        reloc.keep_mask = type == R_PPC_REL24 ? 0xFC000003u : 0xFFFF0003u;
-        break;
-    default:
-        // Code takes no absolute words; one would need its own shift.
-        fprintf(stderr, "error: relocation type %u in overlay code\n", type);
-        return 0;
-    }
-    return module_link_add_reloc(link, &reloc);
-}
-
 // Relocates a placed module against the exports (sorted by name) and adds its
 // sections to the link.
-static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, const Module* module,
+static int link_module(ModuleLink* link, const RecompModule* placed, const Module* module,
                        const ExportList* exports) {
     const Bytes* file = &module->file;
     const RsoHeader* h = &module->header;
@@ -314,12 +289,15 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         const u8* entry = file->data + h->internals + i;
         const u32 offset = read_be32(entry), info = read_be32(entry + 4);
         const u32 section = info >> 8;
-        relocated = section < h->section_count &&
-                    relocate(image, file->size, offset, (u8)info,
-                             module->section_address[section] + read_be32(entry + 8),
-                             module->base + offset) &&
-                    note_reloc(link, group, module, offset, (u8)info, true,
-                               module->section_address[section] == module->bss);
+        if (section >= h->section_count) {
+            relocated = 0;
+            break;
+        }
+        const u32 target = module->section_address[section] + read_be32(entry + 8);
+        relocated = relocate(image, file->size, offset, (u8)info, target, module->base + offset) &&
+                    (!in_code(module, offset) ||
+                     module_link_note(link, module->group, module->base + offset, (u8)info, module->group,
+                                      module->bss && module->section_address[section] == module->bss, target));
     }
     // Imports nothing exports stay bound to the module's unresolved stub,
     // which is also what the game's linker leaves them pointing at.
@@ -335,16 +313,17 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
             break;
         }
         const u8* import = file->data + h->imports + (info >> 8) * 12u;
-        const Export key = {cstring(file, h->import_names + read_be32(import)), 0, 0};
+        const Export key = {cstring(file, h->import_names + read_be32(import)), 0, 0, 0, false};
         const Export* found =
             exports->count ? (const Export*)bsearch(&key, exports->exports, exports->count,
                                                     sizeof(Export), compare_name)
                            : NULL;
         missing += found == NULL;
-        relocated = relocate(image, file->size, offset, (u8)info,
-                             (found ? found->address : unresolved) + read_be32(entry + 8),
-                             module->base + offset) &&
-                    note_reloc(link, group, module, offset, (u8)info, found == NULL, false);
+        const u32 target = (found ? found->address : unresolved) + read_be32(entry + 8);
+        relocated = relocate(image, file->size, offset, (u8)info, target, module->base + offset) &&
+                    (!in_code(module, offset) ||
+                     module_link_note(link, module->group, module->base + offset, (u8)info,
+                                      found ? found->group : module->group, found && found->bss, target));
     }
     if (!relocated) {
         fprintf(stderr, "error: %s: malformed or unsupported relocation\n", placed->file);
@@ -360,17 +339,20 @@ static int link_module(ModuleLink* link, u32 group, const RecompModule* placed, 
         const u32 offset = read_be32(table) & ~1u, size = read_be32(table + 4);
         if (offset == 0 || size == 0 || !fits(file, offset, size))
             continue;
-        ok = module_link_add_section(link, group, code_section(h, index), placed->file, module->base + offset,
-                                     image + offset, size);
+        ok = module_link_add_section(link, module->group, code_section(h, index), placed->file,
+                                     module->base + offset, image + offset, size);
     }
     if (ok)
         printf("linked %s at 0x%08X (%u unresolved imports)%s\n", placed->file, module->base, missing,
-               group ? " as an overlay" : "");
+               !module->group                          ? ""
+               : link->groups[module->group - 1].overlay ? " as an overlay"
+                                                         : " as a module of its own");
     free(image);
     return ok;
 }
 
-int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir) {
+int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir, const u32* static_sections,
+             u32 static_section_count) {
     const u32 module_count = config->rso_module_count;
     Bytes sel = {0};
     RsoHeader sel_header;
@@ -386,25 +368,30 @@ int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
         goto done;
     }
 
-    // Exports: the static module's are section-relative against the
-    // configured static section addresses; each RSO's against its own placed
-    // sections.
+    // Exports: the static module's are section-relative against the static
+    // section addresses; each RSO's against its own placed sections.
     for (u32 i = 0; i + 16u <= sel_header.exports_size; i += 16u) {
         const u8* entry = sel.data + sel_header.exports + i;
         const u32 offset = read_be32(entry + 4), section = read_be32(entry + 8);
         const char* name = cstring(&sel, sel_header.export_names + read_be32(entry));
         if (section == SECTION_ABSOLUTE) {
-            if (!add_to_exports(&exports, name, offset))
+            if (!add_export(&exports.exports, &exports.count, &exports.capacity, name, offset, 0, false))
                 goto done;
-        } else if (section < config->static_section_count && config->static_sections[section]) {
-            if (!add_to_exports(&exports, name, config->static_sections[section] + offset))
+        } else if (section < static_section_count && static_sections[section]) {
+            if (!add_export(&exports.exports, &exports.count, &exports.capacity, name,
+                            static_sections[section] + offset, 0, false))
                 goto done;
         }
     }
-    for (u32 m = 0; m < module_count; m++) {
-        if (!place_module(&modules[m], &config->rso_modules[m], 0, game_dir) ||
-            !visit_exports(&modules[m], add_to_exports, &exports))
-            goto done;
+    // The modules the config places first, so the others' arena leaves them be.
+    for (u32 pass = 0; pass < 2; pass++) {
+        for (u32 m = 0; m < module_count; m++) {
+            if ((config->rso_modules[m].base == 0) != (pass == 1))
+                continue;
+            if (!place_module(link, &modules[m], &config->rso_modules[m], false, 0, game_dir) ||
+                !visit_exports(&modules[m], add_to_exports, &exports))
+                goto done;
+        }
     }
     // A name defined twice keeps its latest definition.
     if (exports.count)
@@ -416,32 +403,21 @@ int rso_link(ModuleLink* link, const RecompConfig* config, const char* game_dir)
     }
     exports.count = unique;
     for (u32 i = 0; i < exports.count; i++) {
-        if (!module_link_add_entry(link, 0, exports.exports[i].address))
+        if (!module_link_add_entry(link, exports.exports[i].group, exports.exports[i].address))
             goto done;
     }
     for (u32 m = 0; m < module_count; m++) {
-        if (!link_module(link, 0, &config->rso_modules[m], &modules[m], &exports))
+        if (!link_module(link, &config->rso_modules[m], &modules[m], &exports))
             goto done;
     }
 
     // Each overlay links against the resident modules alone, the way it finds
     // them when it loads; its own exports are where other code enters it.
     for (u32 k = 0; k < config->rso_overlay_count; k++) {
-        EntryList entries = {link, k + 1u};
         const RecompModule* placed = &config->rso_overlays[k];
-        const int linked = place_module(&overlay, placed, config->rso_overlay_heap_top, game_dir) &&
-                           visit_exports(&overlay, add_to_entries, &entries) &&
-                           link_module(link, k + 1u, placed, &overlay, &exports);
-        if (linked) {
-            LinkedOverlay* where = &link->overlays[k];
-            where->base = overlay.base;
-            where->bss = overlay.bss;
-            where->bss_section = ~0u;
-            for (u32 i = 0; i < overlay.header.section_count; i++) {
-                if (overlay.bss && overlay.section_address[i] == overlay.bss)
-                    where->bss_section = i;
-            }
-        }
+        const int linked = place_module(link, &overlay, placed, true, config->rso_overlay_heap_top, game_dir) &&
+                           visit_exports(&overlay, add_to_entries, link) &&
+                           link_module(link, placed, &overlay, &exports);
         free_module(&overlay);
         if (!linked)
             goto done;

@@ -43,12 +43,20 @@ typedef struct {
     const RELFile* rel;
 } RELModuleMapEntry;
 
+// Told of each relocation applied: the patched address (in rel's section
+// patched), its type and its target, in a section of a module (module 0 and
+// section 0 for the DOL).
+typedef int (*RELRelocationVisitor)(void* user, const RELFile* rel, const RELSection* patched, u32 patch_address,
+                                    u8 type, u32 target_module, u32 target_section, u32 target);
+
 typedef struct {
     const RELModuleMapEntry* entries;
     u32 count;
     // Imports of a module not in the map stay as in the file (OSLink links
     // them when that module loads) instead of failing.
     bool skip_missing;
+    RELRelocationVisitor visit;  // NULL for none
+    void* user;
 } RELModuleMap;
 
 bool rel_load(RELFile* rel, const char* path, u32 base_address);

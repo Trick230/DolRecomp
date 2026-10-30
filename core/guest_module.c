@@ -24,6 +24,8 @@ const GuestModule g_guest_module = {
     NULL,
 #endif
     DOLRECOMP_OVERLAY_COUNT,
+    s_resident_relocs,
+    DOLRECOMP_RESIDENT_RELOC_COUNT,
 };
 
 u32 dolrecomp_overlay_shift[DOLRECOMP_OVERLAY_COUNT ? DOLRECOMP_OVERLAY_COUNT : 1u];
