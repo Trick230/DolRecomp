@@ -208,6 +208,19 @@ int main(void) {
     CHECK(text && strstr(text, "host_static") && !strstr(text, "host_module"));
     free(text);
 
+    // A word the game's linker sets runs as guest memory holds it.
+    static const u32 late_words[] = {0x80001004u};
+    out = fopen(out_path, "wb");
+    CHECK(out);
+    emit_set_late_words(late_words, 1);
+    CHECK(emit_function(out, insts, 3, 0x80001000u));
+    emit_set_late_words(NULL, 0);
+    fclose(out);
+    text = read_text(out_path);
+    CHECK(text && strstr(text, "ppc_fallback_instruction(ctx, mem_read32_at(ctx, 0x80001004u, 0x80001004u), "
+                               "0x80001004u);\n    return;"));
+    free(text);
+
     // A jump native's callers leave to the dispatcher at the pc it set.
     static const DolRecompNative jumps[] = {{0x80001008u, "host_jump", true}};
     out = fopen(out_path, "wb");

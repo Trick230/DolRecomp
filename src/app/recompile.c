@@ -133,6 +133,8 @@ typedef struct {
     u32 reloc_count;
     EmitHaReloc* ha_relocs;
     u32 ha_reloc_count;
+    u32* late_words;  // sorted
+    u32 late_word_count;
 } Module;
 
 static void module_free(Module* module) {
@@ -141,6 +143,7 @@ static void module_free(Module* module) {
     function_analysis_free(&module->analysis);
     free(module->entry_targets);
     free(module->ha_relocs);
+    free(module->late_words);
 }
 
 // FNV-1a 64 of a function's text with the bits its placement changes cleared;
@@ -439,6 +442,7 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
             }
             emit_set_overlay(g, starts, ends, g ? module->section_count : 0u, module->ha_relocs,
                              module->ha_reloc_count);
+            emit_set_late_words(module->late_words, module->late_word_count);
         }
         const u32 first_job = job_count;
         for (u32 s = 0; ok && s < module->section_count; s++) {
@@ -476,6 +480,7 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
         emit_set_function_table(NULL, NULL, NULL, NULL, NULL, 0);
         emit_set_symbol_tag(NULL);
         emit_set_overlay(0, NULL, NULL, 0, NULL, 0);
+        emit_set_late_words(NULL, 0);
         call_table_free(&calls);
     }
     emit_footer(header);
@@ -494,6 +499,14 @@ static int emit_groups(const Module* groups, u32 group_count, const char* out_di
     return ok;
 }
 
+static bool is_late_word_of(const Module* module, u32 address) {
+    for (u32 i = 0; i < module->late_word_count; i++) {
+        if (module->late_words[i] == address)
+            return true;
+    }
+    return false;
+}
+
 // Decodes a group's sections and finds its functions (see analysis/functions.h
 // for where their starts come from).
 static int load_module(Module* module, const GuestRegion* data, u32 data_count, const u32* seeds,
@@ -508,8 +521,10 @@ static int load_module(Module* module, const GuestRegion* data, u32 data_count, 
         module->insts[s] = insts;
         ok = insts != NULL;
         for (u32 i = 0; ok && i < count; i++) {
-            const u32 raw = read_be32(section->data + i * 4u);
-            insts[i] = ppc_decode(raw, section->address + i * 4u);
+            // A late word holds what the file happens to: nothing to analyze.
+            const u32 address = section->address + i * 4u;
+            const u32 raw = is_late_word_of(module, address) ? 0x60000000u : read_be32(section->data + i * 4u);
+            insts[i] = ppc_decode(raw, address);
             if (insts[i].op == PPC_OP_UNKNOWN && embedded_data_word(section->embedded_data_mode, raw))
                 insts[i].embedded_data = true;
         }
@@ -555,16 +570,21 @@ static int compare_reloc(const void* left, const void* right) {
     return a->address < b->address ? -1 : a->address > b->address;
 }
 
-// What the emitter needs of a group's relocations: its address-highs, each
-// of which must be an addis for the shift to land in its register.
+// What the emitter needs of a group's relocations: its late words, and its
+// address-highs, each of which must be an addis for the shift to land in its
+// register.
 static int overlay_ha_relocs(Module* module) {
     module->ha_relocs = (EmitHaReloc*)malloc((module->reloc_count ? module->reloc_count : 1u) *
                                              sizeof(EmitHaReloc));
-    if (!module->ha_relocs)
+    module->late_words = (u32*)malloc((module->reloc_count ? module->reloc_count : 1u) * sizeof(u32));
+    if (!module->ha_relocs || !module->late_words)
         return 0;
     for (u32 i = 0; i < module->reloc_count; i++) {
         const LinkedReloc* reloc = &module->relocs[i];
-        if (reloc->kind == LINKED_RELOC_PLAIN)
+        if (reloc->kind == LINKED_RELOC_LATE && (!module->late_word_count ||
+                                                 module->late_words[module->late_word_count - 1u] != reloc->address))
+            module->late_words[module->late_word_count++] = reloc->address;
+        if (reloc->kind == LINKED_RELOC_PLAIN || reloc->kind == LINKED_RELOC_LATE)
             continue;
         const u8* word =
             section_bytes(module->sections, module->section_count, reloc->address, reloc->address + 4u);

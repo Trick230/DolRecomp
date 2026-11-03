@@ -49,6 +49,10 @@ typedef struct {
 typedef int (*RELRelocationVisitor)(void* user, const RELFile* rel, const RELSection* patched, u32 patch_address,
                                     u8 type, u32 target_module, u32 target_section, u32 target);
 
+// Told of each relocation skip_missing leaves for OSLink: the address it
+// patches when the module loads (in rel's section patched) and its type.
+typedef int (*RELLateVisitor)(void* user, const RELSection* patched, u32 patch_address, u8 type);
+
 typedef struct {
     const RELModuleMapEntry* entries;
     u32 count;
@@ -57,6 +61,7 @@ typedef struct {
     bool skip_missing;
     RELRelocationVisitor visit;  // NULL for none
     void* user;
+    RELLateVisitor late;  // NULL for none
 } RELModuleMap;
 
 bool rel_load(RELFile* rel, const char* path, u32 base_address);

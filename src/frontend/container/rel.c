@@ -295,8 +295,9 @@ bool rel_apply_relocations(RELFile* rel, const RELModuleMap* modules) {
                            import_index * REL_IMPORT_ENTRY_SIZE;
         u32 import_module = read_be32(import);
         u32 cursor = read_be32(import + 4);
-        if (modules && modules->skip_missing && import_module != 0 &&
-            import_module != rel->module_id && !find_module(modules, import_module))
+        const bool missing = modules && modules->skip_missing && import_module != 0 &&
+                             import_module != rel->module_id && !find_module(modules, import_module);
+        if (missing && !modules->late)
             continue;
         u32 current_section_index = 0;
         u32 current_offset = 0;
@@ -349,6 +350,12 @@ bool rel_apply_relocations(RELFile* rel, const RELModuleMap* modules) {
             RELSection* patch_section = &rel->sections[current_section_index];
             u32 target;
             u32 patch_address;
+            if (missing) {
+                if (!section_address_at(rel, current_section_index, current_offset, &patch_address) ||
+                    !modules->late(modules->user, patch_section, patch_address, type))
+                    return false;
+                continue;
+            }
             if (!relocation_target(rel, modules, import_module, section_index,
                                    symbol_offset, &target) ||
                 !section_address_at(rel, current_section_index, current_offset,

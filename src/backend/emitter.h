@@ -72,6 +72,11 @@ typedef struct {
 void emit_set_overlay(u32 index, const u32* range_starts, const u32* range_ends, u32 range_count,
                       const EmitHaReloc* relocs, u32 reloc_count);
 
+// The words of the code being written (sorted, same lifetime rules as the
+// function table) the game's linker sets at run time: each runs through
+// ppc_fallback_instruction as guest memory then holds it.
+void emit_set_late_words(const u32* addresses, u32 count);
+
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
 

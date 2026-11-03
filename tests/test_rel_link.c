@@ -107,6 +107,33 @@ static int write_b(const char* path) {
     return write_file(path, f, sizeof(f));
 }
 
+// Module 3: its text calls module 9, which isn't loaded, and builds an address
+// in it; its data points there too.
+static int write_late(const char* path) {
+    u8 f[0x170];
+    memset(f, 0, sizeof(f));
+    header(f, 3, 3, 0x120, 0x168, 8, 0, 0, sizeof(f));
+    write_be32(f + 0x58, 0x100 | 1u);
+    write_be32(f + 0x5C, 0x10);
+    write_be32(f + 0x60, 0x110);
+    write_be32(f + 0x64, 0x10);
+    write_be32(f + 0x100, 0x48000001u);  // bl
+    write_be32(f + 0x104, 0x3C600000u);  // lis r3
+    write_be32(f + 0x108, 0x38630000u);  // addi r3, r3
+    write_be32(f + 0x10C, 0x4E800020u);
+    u8* r = f + 0x120;
+    r = relocation(r, 0, R_DOLPHIN_SECTION, 1, 0);
+    r = relocation(r, 0, R_PPC_REL24, 1, 0);
+    r = relocation(r, 6, R_PPC_ADDR16_HA, 1, 0);
+    r = relocation(r, 4, R_PPC_ADDR16_LO, 1, 0);
+    r = relocation(r, 0, R_DOLPHIN_SECTION, 2, 0);
+    r = relocation(r, 0, R_PPC_ADDR32, 1, 0);
+    relocation(r, 0, R_DOLPHIN_END, 0, 0);
+    write_be32(f + 0x168, 9);
+    write_be32(f + 0x16C, 0x120);
+    return write_file(path, f, sizeof(f));
+}
+
 static void place(RecompConfig* config, u32 index, const char* file, u32 base, u32 bss) {
     strcpy(config->rel_modules[index].file, file);
     config->rel_modules[index].base = base;
@@ -169,6 +196,31 @@ static const LinkedReloc* reloc_at(const ModuleLink* link, u32 group, u32 addres
     return NULL;
 }
 
+// What a module imports from a module not linked with it is left to the game's
+// linker: those bits of its code are late, its data just stays as in the file.
+static int test_late(void) {
+    CHECK(write_late("test_link_late.rel"), "can't write the REL");
+    RecompConfig config;
+    memset(&config, 0, sizeof(config));
+    place(&config, 0, "test_link_late.rel", A_BASE, 0);
+    config.rel_module_count = 1;
+
+    ModuleLink link = {0};
+    CHECK(rel_link(&link, &config, "."), "rel_link failed");
+    CHECK(link.reloc_count == 3, "%u relocations", link.reloc_count);
+    const u32 text = A_BASE + 0x100u;
+    const LinkedReloc* call = reloc_at(&link, 0, text);
+    const LinkedReloc* high = reloc_at(&link, 0, text + 4u);
+    const LinkedReloc* low = reloc_at(&link, 0, text + 8u);
+    CHECK(call && call->kind == LINKED_RELOC_LATE && call->keep_mask == 0xFC000003u, "the call");
+    CHECK(high && high->kind == LINKED_RELOC_LATE && high->keep_mask == 0xFFFF0000u, "the high half");
+    CHECK(low && low->kind == LINKED_RELOC_LATE && low->keep_mask == 0xFFFF0000u, "the low half");
+    CHECK(read_be32(link.text[0].bytes) == 0x48000001u, "the call was linked");
+    module_link_free(&link);
+    remove("test_link_late.rel");
+    return 1;
+}
+
 #define ARENA 0x80700000u
 
 // Module 1 with no base is a group of its own in the arena, its bss after
@@ -221,7 +273,7 @@ static int test_groups(void) {
 }
 
 int main(void) {
-    if (!test_link() || !test_groups())
+    if (!test_link() || !test_groups() || !test_late())
         return 1;
     printf("REL link tests passed\n");
     return 0;

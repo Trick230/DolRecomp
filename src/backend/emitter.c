@@ -121,6 +121,26 @@ void emit_set_overlay(u32 index, const u32* range_starts, const u32* range_ends,
     g_ha_reloc_count = reloc_count;
 }
 
+static const u32* g_late_words = NULL;
+static u32 g_late_word_count = 0;
+
+void emit_set_late_words(const u32* addresses, u32 count) {
+    g_late_words = count ? addresses : NULL;
+    g_late_word_count = count;
+}
+
+static bool is_late_word(u32 address) {
+    u32 lo = 0, hi = g_late_word_count;
+    while (lo < hi) {
+        const u32 mid = lo + (hi - lo) / 2u;
+        if (g_late_words[mid] < address)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo < g_late_word_count && g_late_words[lo] == address;
+}
+
 // Ends included: a function's end is where its last block falls through.
 static bool in_overlay_code(u32 address) {
     for (u32 i = 0; i < g_overlay_range_count; i++) {
@@ -980,6 +1000,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     if (inst->embedded_data) {
         fprintf(out, "    // embedded data\n\n");
+        return;
+    }
+
+    if (is_late_word(inst->address)) {
+        const char* cia = code_address(inst->address);
+        fprintf(out, "    ppc_fallback_instruction(ctx, mem_read32_at(ctx, %s, %s), %s);\n", cia, cia, cia);
+        fprintf(out, "    return;\n\n");
         return;
     }
 

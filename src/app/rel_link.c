@@ -90,13 +90,20 @@ static int note(void* user, const RELFile* rel, const RELSection* patched, u32 p
     return module_link_note(notes->link, notes->group, patch_address, type, group, to_bss, target);
 }
 
+static int note_late(void* user, const RELSection* patched, u32 patch_address, u8 type) {
+    const LinkNotes* notes = (const LinkNotes*)user;
+    return !patched->executable || type == 0 ||
+           module_link_note_late(notes->link, notes->group, patch_address, type);
+}
+
 // Relocates a loaded module against the map's and adds it to the link.
 static int link_rel(ModuleLink* link, RELFile* rel, u32 group, const char* file, const RELModuleMapEntry* entries,
                     const u32* groups, u32 count) {
     LinkNotes notes = {link, entries, groups, count, group};
     // Imports of any module not in the map stay as in the file, as OSLink
-    // leaves them until that module loads.
-    const RELModuleMap map = {entries, count, true, note, &notes};
+    // leaves them until that module loads; in code, they're read as the code
+    // runs.
+    const RELModuleMap map = {entries, count, true, note, &notes, note_late};
     if (!rel_apply_relocations(rel, &map)) {
         fprintf(stderr, "error: %s: can't apply its relocations\n", file);
         return 0;

@@ -51,10 +51,14 @@ typedef struct {
 // A word of code that depends on where some module loads: the bits outside
 // keep_mask. An address-high also says whose shift its target moves by: the
 // target group's, of its file or its bss (EmitHaReloc in backend/emitter.h).
+// A late word imports from a module the recompiler doesn't link it against (an
+// overlay, say): the game's linker sets those bits each time that module loads
+// or unloads, so the instruction is read from guest memory when it runs.
 typedef enum {
     LINKED_RELOC_PLAIN,
     LINKED_RELOC_HA_MODULE,
     LINKED_RELOC_HA_BSS,
+    LINKED_RELOC_LATE,
 } LinkedRelocKind;
 
 typedef struct {
@@ -133,6 +137,8 @@ u32 module_link_place(ModuleLink* link, u32 size);
 // changes the word. A branch into another group also marks where it enters.
 int module_link_note(ModuleLink* link, u32 group, u32 address, u8 type, u32 target_group, bool to_bss,
                      u32 target);
+// Notes a relocation left to the game's linker in the word holding address.
+int module_link_note_late(ModuleLink* link, u32 group, u32 address, u8 type);
 void module_link_free(ModuleLink* link);
 
 #endif

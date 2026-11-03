@@ -122,6 +122,26 @@ int module_link_note(ModuleLink* link, u32 group, u32 address, u8 type, u32 targ
     return module_link_add_reloc(link, &reloc);
 }
 
+int module_link_note_late(ModuleLink* link, u32 group, u32 address, u8 type) {
+    LinkedReloc reloc = {group, address & ~3u, 0, LINKED_RELOC_LATE, group};
+    switch (type) {
+    case R_PPC_ADDR16_LO:
+    case R_PPC_ADDR16_HI:
+    case R_PPC_ADDR16_HA:
+        reloc.keep_mask = address & 2u ? 0xFFFF0000u : 0x0000FFFFu;
+        break;
+    case R_PPC_REL24:
+        reloc.keep_mask = 0xFC000003u;
+        break;
+    case R_PPC_REL14:
+        reloc.keep_mask = 0xFFFF0003u;
+        break;
+    default:
+        break;  // the whole word
+    }
+    return module_link_add_reloc(link, &reloc);
+}
+
 void module_link_free(ModuleLink* link) {
     for (u32 i = 0; i < link->count; i++)
         free(link->text[i].bytes);
