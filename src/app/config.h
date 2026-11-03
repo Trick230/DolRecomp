@@ -14,6 +14,7 @@
 //   cpu = "broadway"
 //   natives = ["mwcc.sigs", "rvl.sigs", "sdk.sigs"]
 //   sigdb = "C:/Program Files/Dolphin/Sys/totaldb.dsy"
+//   entries = "entries.txt"
 //   shards = 64
 //
 //   [rso]
@@ -78,6 +79,10 @@ typedef struct {
     DolRecompCPU cpu;
     char natives[RECOMP_MAX_NATIVES_FILES][1024];
     u32 natives_count;
+    // Beside the config; a file the runtime writes, so it may not exist yet:
+    // where code entered that analysis didn't find, one "<hex address>
+    // [module file]" line each (no module for the DOL and placed modules).
+    char entries[1024];
     char sigdb[1024];  // empty without one
     u32 shards;
 

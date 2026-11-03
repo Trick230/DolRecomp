@@ -168,6 +168,13 @@ int config_load(RecompConfig* config, const char* path) {
             goto done;
     }
 
+    if (toml_key_exists(main, "entries")) {
+        char file[512];
+        if (!copy_string(file, sizeof(file), toml_string_in(main, "entries"), "main.entries") ||
+            !beside_config(config->entries, sizeof(config->entries), path, file))
+            goto done;
+    }
+
     config->cpu = DOLRECOMP_CPU_BROADWAY;
     if (toml_key_exists(main, "cpu")) {
         char cpu[16];

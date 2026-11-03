@@ -663,6 +663,38 @@ static u32 dol_end(const DOLFile* dol) {
     return end;
 }
 
+// Adds where the runtime saw code entered (the config's main.entries) to the
+// link's entries. One the game no longer has (another module list, say) is
+// left out.
+static int load_seen_entries(ModuleLink* link, const char* path, const Module* groups, u32 group_count) {
+    FILE* file = fopen(path, "r");
+    if (!file)
+        return 1;
+    char line[1200];
+    u32 added = 0, unknown = 0;
+    int ok = 1;
+    while (ok && fgets(line, sizeof(line), file)) {
+        u32 address = 0;
+        char name[1024] = "";
+        if (line[0] == '#' || sscanf(line, "%x %1023[^\r\n]", &address, name) < 1)
+            continue;
+        u32 g = 0;
+        while (g < group_count && (name[0] ? !groups[g].name || strcmp(groups[g].name, name) != 0 : g != 0))
+            g++;
+        if (g == group_count || (address & 3u) != 0 ||
+            !section_bytes(groups[g].sections, groups[g].section_count, address, address + 4u)) {
+            unknown++;
+            continue;
+        }
+        ok = module_link_add_entry(link, g, address);
+        added++;
+    }
+    fclose(file);
+    if (added || unknown)
+        printf("entries seen at run time: %u, %u of them not in this link\n", added + unknown, unknown);
+    return ok;
+}
+
 int recompile(const RecompConfig* config, const char* game_dir, const char* out_dir) {
     char dol_path[1200];
     DOLFile dol;
@@ -737,6 +769,8 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
         ok = overlay_ha_relocs(module);
         i = end;
     }
+
+    ok = ok && (!config->entries[0] || load_seen_entries(link, config->entries, groups, group_count));
 
     DolRecompNativeList natives = {0};
     NativeSignatures signatures = {0};

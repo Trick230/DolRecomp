@@ -20,6 +20,7 @@ you write for the game, the way XenonRecomp leaves them to UnleashedRecomp.
 - [The config file](#the-config-file)
 - [Modules](#modules)
 - [Natives](#natives)
+- [Code analysis can't reach](#code-analysis-cant-reach)
 - [Output](#output)
 - [Writing a runtime](#writing-a-runtime)
 - [Limitations](#limitations)
@@ -134,7 +135,7 @@ as Dolphin writes them.
 
 A config is a TOML file. Paths in `[main]`, `[rso]` and `[rel]` are relative
 to the extracted game, except `natives` and `sigdb`, which are relative to the
-config file. Any path may be absolute.
+config file (`entries` too). Any path may be absolute.
 
 ```toml
 [main]
@@ -142,6 +143,7 @@ dol = "sys/main.dol"
 cpu = "broadway"                          # or "gekko" for GameCube
 natives = ["mwcc.sigs", "rvl.sigs"]       # optional
 sigdb = "C:/Dolphin/Sys/totaldb.dsy"      # optional
+entries = "entries.txt"                   # optional
 shards = 64                               # optional
 
 [rso]                                     # Wii games with RSO modules
@@ -171,6 +173,7 @@ IDLE_PC = 0x8036623C
 | `cpu` | `"gekko"` (GameCube) or `"broadway"` (Wii, the default). The generated header defines `DOLRECOMP_CPU_GEKKO` or `DOLRECOMP_CPU_BROADWAY` |
 | `natives` | Signature files of the SDK functions your runtime implements (see [Natives](#natives)) |
 | `sigdb` | Dolphin's signature database, to name SDK functions and propose signatures |
+| `entries` | Where the runtime saw code entered that analysis didn't find (see [Code analysis can't reach](#code-analysis-cant-reach)). The file need not exist yet |
 | `shards` | How many C sources the output is split into (default 64) |
 
 **`[rso]`**
@@ -217,6 +220,14 @@ it loads, and gets functions of its own, named `func_<module>_<address>`. Its
 functions can overlap other overlays' and the resident code's; at run time,
 of the functions over a pc, the one whose hash matches guest RAM runs.
 
+### Imports from modules loaded later
+
+A REL importing from a module it isn't linked with here (a resident module
+from an overlay, an overlay from another) has words the game's linker sets each
+time that module loads or unloads. Those bits stay out of the function's hash,
+and each such instruction runs through `instruction_fallback` as guest memory
+then holds it; the rest of the function stays recompiled.
+
 ### Placement
 
 Modules are compiled for one address and run wherever the game loads them:
@@ -258,7 +269,7 @@ side effects, to run the guest code instead.
 Natives are listed in `.sigs` files, one per line:
 
 ```
-<symbol> <size> <first> <hash> [at <expression>] [jump]
+<symbol> <size> <first> <hash> [at <expression>] [jump] [anywhere]
 ```
 
 `size` is the function's size in bytes. `first` and `hash` are its first
@@ -266,13 +277,22 @@ instruction and the FNV-1a 64 hash of its code, with what the linker decides
 masked out: branch targets outside the function, `lis` immediates and the low
 halves paired with them, and small-data (`r2`/`r13`) offsets. Everything else
 stays, struct offsets included, so a native only replaces the SDK build it was
-written for. `dolrecomp sign` prints the three fields for the code at an
-address.
+written for: a struct laid out differently, or a step more, is other code, and
+stays recompiled guest code. `dolrecomp sign` prints the three fields for the
+code at an address.
+
+A symbol may have one line per SDK build its host code is right for. The game
+takes the line it has.
 
 - Without `at`, the code must occur exactly once in the game. Code too
   generic for that (a getter, a point inside a function) is found `at` an
   expression over other entries, and checked there.
 - `jump` marks a native that sets the pc itself instead of returning.
+- `anywhere` marks a native whose host code keeps no state in the game's
+  globals (`memcpy`, a matrix routine). It also replaces copies of its code
+  inside modules compiled to run anywhere, once per module. Other natives stay
+  out of those: a module's copy of an SDK function has its own globals, not the
+  ones the defines read off the static code. It can't go with `at` or `jump`.
 - A symbol starting with `@` is an anchor: an entry that only helps locate
   others.
 - `#` starts a comment. An entry the game doesn't have is skipped, with any
@@ -291,8 +311,9 @@ define <NAME> <expression>
 | `addr(S+hi,lo)` | The address the `lis` at `S+hi` and the instruction at `S+lo` build |
 | `imm(S+off)` | The signed 16-bit immediate there |
 
-Offsets are hexadecimal. Defines go to `ppc_natives.h`. The full format is
-described in `src/app/natives.h`.
+Offsets are hexadecimal. Defines go to `ppc_natives.h`. A name may have one line
+per SDK build: the first the game can read wins. The full format is described
+in `src/app/natives.h`.
 
 ### Bringing natives to a new game
 
@@ -307,6 +328,23 @@ shipping it). The output then also gets:
 The database only checks opcodes, so a candidate is a function with the right
 name and shape: compare it with the SDK build your native was written for
 before using it.
+
+## Code analysis can't reach
+
+Functions are found from branches, symbols, module exports and data words that
+point into code. Code entered only through a pointer computed at run time, at a
+point that starts no block, has no entry: the runtime steps it (usually with an
+interpreter) until it reaches one. That is correct, only slower, and it closes
+by running the game:
+
+1. The runtime records each point it had to step from, as `<hex address>
+   [module file]` lines, the address where the code was compiled and no module
+   for the DOL and placed modules. DualizeRecomp's `--log-entries` does this.
+2. The config's `entries` names that file.
+3. The next recompilation gives those points entries.
+
+Addresses a later version of the config no longer has are left out, with a
+count in the output. What the game never runs stays unseen, and costs nothing.
 
 ## Output
 
@@ -333,8 +371,9 @@ The generated code expects a runtime around it. Through `core/cpu.h` and
   MEM1 and MEM2 (then `ppc_build_fast_memory()`), and its callbacks:
   `external_read`/`external_write` (MMIO and anything outside RAM), `spr_read`
   and `spr_write`, `cache_control` and `cache_range`, `instruction_fallback`
-  (instructions the generated code leaves to the host), `read_timebase` and
-  `msr_written`.
+  (instructions the generated code leaves to the host, including words the
+  game's linker sets at run time; see [Modules](#modules)), `read_timebase`
+  and `msr_written`.
 - **The dispatcher.** `dolrecomp_lookup(ctx, pc)` returns the function to run
   at a pc, or NULL for the runtime to handle it (usually with an
   interpreter). `g_guest_module` lists every function with its range and
@@ -359,19 +398,17 @@ is a complete runtime to read alongside this list.
 
 ## Limitations
 
-- **Native signatures are per SDK build.** A native matches only the SDK
-  version it was written for. On another game its function stays recompiled
-  guest code: correct, only slower until a signature for that build is
-  written.
-- **Function discovery is heuristic.** Functions are found from branches,
-  symbols, module exports and data words that point into code. Code reached
-  only through pointers computed at run time, or entered in the middle, is
-  left to the runtime (usually its interpreter).
-- **Natives are looked for in the DOL and in modules with a `base` only.** An
-  SDK function inside a module compiled to run anywhere is not replaced.
-- **A resident REL importing from a REL overlay.** When the overlay loads, the
-  game's linker patches the resident module's code; those functions then no
-  longer match their hashes and run on the runtime's fallback.
+- **Natives need a signature for each SDK build.** An SDK build with no line
+  stays recompiled guest code: correct, only slower. A line is added once
+  someone checks the host code is right for that build.
+- **Function discovery improves by running the game.** Code nothing analyzable
+  reaches is stepped by the runtime until a run has logged it (see
+  [Code analysis can't reach](#code-analysis-cant-reach)), and code no run
+  reaches stays unknown.
+- **Natives that keep state stay out of moving modules.** Only `anywhere`
+  natives replace code in a module compiled to run anywhere.
+- **Imports from a module not linked with it are slower, not wrong.** Each such
+  instruction goes through `instruction_fallback` each time it runs.
 
 ## Tests
 
