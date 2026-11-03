@@ -15,8 +15,9 @@
 // the linker decides: targets of branches that leave the function, lis
 // immediates, small-data (r2/r13) offsets and the low halves paired with a lis.
 // Everything else stays, struct offsets included, so a host implementation
-// only replaces the SDK build it was written against. Without `at` the code
-// must occur once in the game; code too generic for that (a getter, an
+// only replaces the SDK build it was written against. A symbol may have a line
+// for each SDK build its host code is right for. Without `at` the code must
+// occur once in the game; code too generic for that (a getter, an
 // instruction hooked mid-function) is found `at` an expression of other
 // entries and checked there. `jump` marks a native that sets the pc itself
 // (see DolRecompNative). A symbol starting with '@' is an anchor: an entry
@@ -31,7 +32,8 @@
 // against. Expressions: `S` or `S+off`, an address in entry S;
 // `call(S+off)`, the target of the branch there; `addr(S+hi,lo)`, the address
 // the lis at S+hi and the instruction at S+lo build; `imm(S+off)`, the signed
-// 16-bit immediate there. Offsets are hex.
+// 16-bit immediate there. Offsets are hex. A name may have a line for each SDK
+// build, where the value sits elsewhere: the first the game can read wins.
 //
 // An entry the game doesn't have is skipped, with any define that needs it.
 typedef struct {

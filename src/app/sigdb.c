@@ -223,7 +223,10 @@ int sigdb_report(const SigDB* db, const FunctionAnalysis* analysis, const Loaded
                             "# against the native's SDK build before using it.\n");
     for (u32 s = 0; ok && s < signatures->count; s++) {
         const NativeSignature* sig = &signatures->entries[s];
+        // A symbol's lines for other SDK builds ask for one candidate.
         int found = sig->symbol[0] == '@' || sig->at != NULL;
+        for (u32 e = 0; e < s && !found; e++)
+            found = strcmp(signatures->entries[e].symbol, sig->symbol) == 0;
         for (u32 n = 0; !found && n < natives->count; n++)
             found = strcmp(natives->entries[n].name, sig->symbol) == 0;
         for (u32 i = 0; !found && i < analysis->function_count; i++) {

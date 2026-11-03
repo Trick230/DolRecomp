@@ -307,9 +307,12 @@ static int evaluate(const Resolver* r, const char* expression, long long* value,
             return -1;
         *plus = '\0';
     }
+    // Of a symbol's lines, one per SDK build, the one this game has.
     u32 entry = r->signatures->count;
-    for (u32 i = 0; i < r->signatures->count && entry == r->signatures->count; ++i) {
-        if (strcmp(r->signatures->entries[i].symbol, text) == 0)
+    for (u32 i = 0; i < r->signatures->count; ++i) {
+        if (strcmp(r->signatures->entries[i].symbol, text) == 0 &&
+            (entry == r->signatures->count || r->states[entry] == ABSENT ||
+             (r->states[entry] == PENDING && r->states[i] == FOUND)))
             entry = i;
     }
     if (entry == r->signatures->count)
@@ -510,7 +513,8 @@ int natives_resolve(DolRecompNativeList* list, const NativeSignatures* signature
             const DolRecompNative* native = &list->entries[i];
             u32 size = 0;
             for (u32 e = 0; e < count && !size; ++e) {
-                if (strcmp(signatures->entries[e].symbol, native->name) == 0)
+                if (r.states[e] == FOUND && r.addresses[e] == native->address &&
+                    strcmp(signatures->entries[e].symbol, native->name) == 0)
                     size = signatures->entries[e].size;
             }
             list->sizes[i] = size;
@@ -532,6 +536,12 @@ int natives_resolve(DolRecompNativeList* list, const NativeSignatures* signature
     }
     for (u32 i = 0; ok && i < signatures->define_count; ++i) {
         const NativeDefine* define = &signatures->defines[i];
+        // One line per SDK build: the first this game can read.
+        int defined = 0;
+        for (u32 d = 0; d < list->define_count && !defined; ++d)
+            defined = strcmp(list->define_names[d], define->name) == 0;
+        if (defined)
+            continue;
         long long value = 0;
         const char* needs = NULL;
         const int result = evaluate(&r, define->expression, &value, &needs);

@@ -85,6 +85,21 @@ int main(void) {
     CHECK(resolve_text(&list, sigs, sections + 2, 1) && list.count == 0);
     natives_free(&list);
 
+    // One line per SDK build: the build this game has counts, with its size, and
+    // a define takes the first line it can read.
+    snprintf(sigs, sizeof(sigs),
+             "host_get 8 11111111 2222222222222222\n"
+             "host_get 10 %08X %016llX\n"
+             "define GETTER other_build\n"
+             "define GETTER host_get+4\n"
+             "define GETTER host_get+8\n"
+             "other_build 4 0 0\n",
+             first, (unsigned long long)hash);
+    CHECK(resolve_text(&list, sigs, sections, 1));
+    CHECK(list.count == 1 && list.entries[0].address == 0x80001000u && list.sizes[0] == 16);
+    CHECK(list.define_count == 1 && list.define_values[0] == 0x80001004);
+    natives_free(&list);
+
     // Found at an anchor's call, with defines read off it.
     snprintf(sigs, sizeof(sigs),
              "# comment\n"
