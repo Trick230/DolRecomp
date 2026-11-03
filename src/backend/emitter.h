@@ -35,7 +35,8 @@ void emit_set_symbol_tag(const char* tag);
 // A guest function with a host implementation, `bool name(CPUState*)`, that
 // the module links in. It returns true after doing the whole call (registers,
 // memory, cycles) and false, with no side effects, when the guest code has to
-// run instead. Same lifetime rules as the function table; sorted by address.
+// run instead. Same lifetime rules as the function table; sorted by address,
+// then group: the code it replaces is that group's (see emit_set_overlay).
 // A `jump` native ends somewhere other than its return address (a context
 // load ending in rfi): it sets ctx->pc itself and its callers go back to the
 // dispatcher instead of resuming after the call.
@@ -43,6 +44,7 @@ typedef struct {
     u32 address;
     const char* name;
     bool jump;
+    u32 group;
 } DolRecompNative;
 void emit_set_natives(const DolRecompNative* natives, u32 count);
 

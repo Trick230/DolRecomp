@@ -185,10 +185,15 @@ int natives_parse(NativeSignatures* signatures, const char* text, const char* or
             entry.jump = 1;
             ++next;
         }
-        if (!ok || next != count || (entry.jump && token[0][0] == '@')) {
+        if (ok && next < count && strcmp(token[next], "anywhere") == 0) {
+            entry.anywhere = 1;
+            ++next;
+        }
+        if (!ok || next != count || (entry.jump && token[0][0] == '@') ||
+            (entry.anywhere && (at || entry.jump || token[0][0] == '@'))) {
             fprintf(stderr,
                     "error: %s:%u: expected '<symbol> <size> <first> <hash> [at <expression>] "
-                    "[jump]'\n",
+                    "[jump]', or `anywhere` on a plain entry\n",
                     origin, line_number);
             return 0;
         }
@@ -267,6 +272,7 @@ typedef struct {
     u32 section_count;
     u32* addresses;
     u8* states;
+    bool module;  // a module compiled to run anywhere
 } Resolver;
 
 // 1 with the value, 0 while an entry it needs is pending, -1 when it can't be
@@ -370,7 +376,9 @@ static int compare_first(const void* a, const void* b) {
     return x->first < y->first ? -1 : x->first > y->first;
 }
 
-// Finds the entries without `at`, each of which must occur once.
+// Finds the entries without `at`, each of which must occur once; in a module
+// compiled to run anywhere only those marked for it, and one that occurs more
+// is left alone, as a config can't tell such a module apart with an `at`.
 static int search(Resolver* r) {
     const NativeSignatures* signatures = r->signatures;
     FirstWord* index = malloc((signatures->count + 1) * sizeof(*index));
@@ -383,7 +391,7 @@ static int search(Resolver* r) {
     }
     u32 searched = 0;
     for (u32 i = 0; i < signatures->count; ++i) {
-        if (!signatures->entries[i].at)
+        if (!signatures->entries[i].at && (!r->module || signatures->entries[i].anywhere))
             index[searched++] = (FirstWord){signatures->entries[i].first, i};
     }
     qsort(index, searched, sizeof(*index), compare_first);
@@ -406,6 +414,9 @@ static int search(Resolver* r) {
                     continue;
                 if (hits[match->entry]++ == 0) {
                     r->addresses[match->entry] = address;
+                } else if (r->module) {
+                    printf("note: native %s matches both %08X and %08X in a module, skipped\n",
+                           entry->symbol, r->addresses[match->entry], address);
                 } else {
                     fprintf(stderr,
                             "error: native %s matches both %08X and %08X: find it `at` another "
@@ -417,7 +428,9 @@ static int search(Resolver* r) {
         }
     }
     for (u32 i = 0; i < searched; ++i)
-        r->states[index[i].entry] = hits[index[i].entry] ? FOUND : ABSENT;
+        r->states[index[i].entry] = hits[index[i].entry] == 1 || (hits[index[i].entry] && !r->module)
+                                        ? FOUND
+                                        : ABSENT;
     free(index);
     free(hits);
     return ok;
@@ -479,7 +492,7 @@ int natives_resolve(DolRecompNativeList* list, const NativeSignatures* signature
     memset(list, 0, sizeof(*list));
     const u32 count = signatures->count;
     Resolver r = {signatures, sections, section_count, calloc(count + 1, sizeof(u32)),
-                  calloc(count + 1, 1)};
+                  calloc(count + 1, 1), false};
     int ok = r.addresses && r.states;
     if (!ok)
         fprintf(stderr, "error: out of memory finding natives\n");
@@ -505,7 +518,7 @@ int natives_resolve(DolRecompNativeList* list, const NativeSignatures* signature
             ok = 0;
             break;
         }
-        list->entries[list->count++] = (DolRecompNative){r.addresses[i], name, entry->jump};
+        list->entries[list->count++] = (DolRecompNative){r.addresses[i], name, entry->jump, 0};
     }
     if (ok) {
         qsort(list->entries, list->count, sizeof(*list->entries), compare_natives);
@@ -570,6 +583,59 @@ int natives_resolve(DolRecompNativeList* list, const NativeSignatures* signature
     return ok;
 }
 
+int natives_resolve_module(DolRecompNativeList* list, const NativeSignatures* signatures,
+                           const LoadedCodeSection* sections, u32 section_count, u32 group) {
+    const u32 count = signatures->count;
+    Resolver r = {signatures, sections, section_count, calloc(count + 1, sizeof(u32)),
+                  calloc(count + 1, 1), true};
+    int ok = r.addresses && r.states;
+    if (!ok)
+        fprintf(stderr, "error: out of memory finding natives\n");
+    ok = ok && search(&r);
+    for (u32 i = 0; ok && i < count; ++i) {
+        const NativeSignature* entry = &signatures->entries[i];
+        if (!entry->anywhere || r.states[i] != FOUND)
+            continue;
+        const u32 address = r.addresses[i];
+        u32 at = 0;
+        while (at < list->count && (list->entries[at].address < address ||
+                                    (list->entries[at].address == address && list->entries[at].group < group)))
+            ++at;
+        if (at < list->count && list->entries[at].address == address && list->entries[at].group == group) {
+            fprintf(stderr, "error: natives %s and %s are both at %08X\n", list->entries[at].name, entry->symbol,
+                    address);
+            ok = 0;
+            break;
+        }
+        DolRecompNative* entries = realloc(list->entries, (list->count + 1u) * sizeof(*entries));
+        if (entries)
+            list->entries = entries;
+        u32* sizes = realloc(list->sizes, (list->count + 1u) * sizeof(*sizes));
+        if (sizes)
+            list->sizes = sizes;
+        u64* hashes = realloc(list->hashes, (list->count + 1u) * sizeof(*hashes));
+        if (hashes)
+            list->hashes = hashes;
+        char* name = entries && sizes && hashes ? copy_text(entry->symbol) : NULL;
+        if (!name) {
+            fprintf(stderr, "error: out of memory finding natives\n");
+            ok = 0;
+            break;
+        }
+        const u32 after = list->count - at;
+        memmove(&list->entries[at + 1], &list->entries[at], after * sizeof(*entries));
+        memmove(&list->sizes[at + 1], &list->sizes[at], after * sizeof(*sizes));
+        memmove(&list->hashes[at + 1], &list->hashes[at], after * sizeof(*hashes));
+        list->entries[at] = (DolRecompNative){address, name, false, group};
+        list->sizes[at] = entry->size;
+        list->hashes[at] = fnv1a64(FNV_BASIS, code_at(sections, section_count, address, entry->size), entry->size);
+        ++list->count;
+    }
+    free(r.addresses);
+    free(r.states);
+    return ok;
+}
+
 int natives_write_list(const DolRecompNativeList* list, const char* path) {
     OutputFile output;
     if (!output_open(&output, path, "w")) {
@@ -577,12 +643,16 @@ int natives_write_list(const DolRecompNativeList* list, const char* path) {
         return 0;
     }
     fputs("# Generated by DolRecomp: the natives its signatures found in this game.\n"
-          "# <address> <size> <fnv1a64 of the code bytes> <symbol> [jump]\n",
+          "# <address> <size> <fnv1a64 of the code bytes> <symbol> [jump] [group <g>]\n",
           output.stream);
-    for (u32 i = 0; i < list->count; ++i)
-        fprintf(output.stream, "%08X %04X %016llX %s%s\n", list->entries[i].address,
-                list->sizes[i], (unsigned long long)list->hashes[i], list->entries[i].name,
+    for (u32 i = 0; i < list->count; ++i) {
+        fprintf(output.stream, "%08X %04X %016llX %s%s", list->entries[i].address, list->sizes[i],
+                (unsigned long long)list->hashes[i], list->entries[i].name,
                 list->entries[i].jump ? " jump" : "");
+        if (list->entries[i].group)
+            fprintf(output.stream, " group %u", list->entries[i].group);
+        fputc('\n', output.stream);
+    }
     return output_close(&output);
 }
 

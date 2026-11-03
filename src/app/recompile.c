@@ -728,6 +728,11 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
     if (ok && signatures.count)
         printf("natives: %u guest functions with host implementations, of %u signatures\n",
                natives.count, signatures.count);
+    const u32 static_natives = natives.count;
+    for (u32 g = 1; ok && g < group_count; g++)
+        ok = natives_resolve_module(&natives, &signatures, groups[g].sections, groups[g].section_count, g);
+    if (ok && natives.count != static_natives)
+        printf("natives: %u more in modules compiled to run anywhere\n", natives.count - static_natives);
     for (u32 i = 0; ok && i < config->define_count; i++)
         ok = natives_add_define(&natives, config->defines[i].name, config->defines[i].value);
     emit_set_natives(natives.entries, natives.count);
@@ -768,8 +773,10 @@ int recompile(const RecompConfig* config, const char* game_dir, const char* out_
             if (link->entries[i].group == g)
                 seeds[seed_count++] = link->entries[i].address;
         }
-        for (u32 i = 0; g == 0 && i < natives.count; i++)
-            seeds[seed_count++] = natives.entries[i].address;
+        for (u32 i = 0; i < natives.count; i++) {
+            if (natives.entries[i].group == g)
+                seeds[seed_count++] = natives.entries[i].address;
+        }
         ok = load_module(module, data, data_count, seeds, seed_count);
         // The resident entry targets come from the DOL's data alone.
         module->entry_targets =

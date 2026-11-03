@@ -100,6 +100,29 @@ int main(void) {
     CHECK(list.define_count == 1 && list.define_values[0] == 0x80001004);
     natives_free(&list);
 
+    // A module compiled to run anywhere takes only what's marked for it, beside
+    // what the static code has at the same address; twice in it is left alone.
+    snprintf(sigs, sizeof(sigs),
+             "host_get 10 %08X %016llX anywhere\n"
+             "host_call 8 %08X %016llX\n",
+             first, (unsigned long long)hash, first_caller, (unsigned long long)hash_caller);
+    NativeSignatures marked = {0};
+    CHECK(natives_parse(&marked, sigs, "test"));
+    CHECK(natives_resolve(&list, &marked, sections, 1));
+    CHECK(list.count == 2 && list.entries[0].group == 0);
+    CHECK(natives_resolve_module(&list, &marked, sections, 1, 1));
+    CHECK(list.count == 3 && list.entries[0].address == 0x80001000u && list.entries[0].group == 0 &&
+          list.entries[1].address == 0x80001000u && list.entries[1].group == 1 &&
+          list.entries[2].address == 0x80001010u && list.entries[2].group == 0);
+    CHECK(list.sizes[1] == 16 && list.hashes[1] == 0x09817D2F071E01E3ull);
+    CHECK(natives_resolve_module(&list, &marked, sections, 2, 2) && list.count == 3);
+    natives_free(&list);
+    natives_signatures_free(&marked);
+    CHECK(!natives_parse(&marked, "host_get 10 0 0 at other anywhere\n", "test"));
+    CHECK(!natives_parse(&marked, "host_get 10 0 0 jump anywhere\n", "test"));
+    CHECK(!natives_parse(&marked, "@anchor 10 0 0 anywhere\n", "test"));
+    natives_signatures_free(&marked);
+
     // Found at an anchor's call, with defines read off it.
     snprintf(sigs, sizeof(sigs),
              "# comment\n"
@@ -160,6 +183,29 @@ int main(void) {
                        "                    return;"));
     CHECK(strstr(text, "goto native_declined_80001008;"));
     CHECK(strstr(text, "label_80001008:\n    {\n        bool host_leaf(CPUState* ctx);"));
+    free(text);
+
+    // At an address two groups use, the native of the group whose code it is.
+    static const DolRecompNative grouped[] = {{0x80001008u, "host_static", false, 0},
+                                              {0x80001008u, "host_module", false, 1}};
+    static const u32 module_start[] = {0x80001000u}, module_end[] = {0x8000100Cu};
+    out = fopen(out_path, "wb");
+    CHECK(out);
+    emit_set_natives(grouped, 2);
+    emit_set_overlay(1, module_start, module_end, 1, NULL, 0);
+    CHECK(emit_function(out, insts, 3, 0x80001000u));
+    emit_set_overlay(0, NULL, NULL, 0, NULL, 0);
+    fclose(out);
+    text = read_text(out_path);
+    CHECK(text && strstr(text, "host_module") && !strstr(text, "host_static"));
+    free(text);
+    out = fopen(out_path, "wb");
+    CHECK(out);
+    CHECK(emit_function(out, insts, 3, 0x80001000u));
+    emit_set_natives(NULL, 0);
+    fclose(out);
+    text = read_text(out_path);
+    CHECK(text && strstr(text, "host_static") && !strstr(text, "host_module"));
     free(text);
 
     // A jump native's callers leave to the dispatcher at the pc it set.

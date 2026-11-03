@@ -209,6 +209,8 @@ int sigdb_report(const SigDB* db, const FunctionAnalysis* analysis, const Loaded
     // What the database says of the natives found, and lines for the rest.
     u32 agree = 0, other = 0, candidate_count = 0;
     for (u32 n = 0; ok && n < natives->count; n++) {
+        if (natives->entries[n].group)
+            continue;  // the database was matched against the static code
         const GuestFunction* f = function_analysis_find(analysis, natives->entries[n].address);
         const SigDBEntry* entry =
             f && f->start == natives->entries[n].address ? named[f - analysis->functions] : NULL;

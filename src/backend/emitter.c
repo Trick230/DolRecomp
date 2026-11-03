@@ -451,7 +451,12 @@ static bool is_entry_target(u32 addr) {
     return lo < g_entry_target_count && g_entry_targets[lo] == addr;
 }
 
+// The native over addr, in the group whose code is there for the code being
+// written: modules' addresses overlap.
 static const DolRecompNative* native_for(u32 addr) {
+    if (!g_native_count)
+        return NULL;
+    const u32 group = g_overlay && in_overlay_code(addr) ? g_overlay : function_group(function_index_for(addr));
     u32 lo = 0, hi = g_native_count;
     while (lo < hi) {
         u32 mid = lo + (hi - lo) / 2u;
@@ -460,7 +465,11 @@ static const DolRecompNative* native_for(u32 addr) {
         else
             hi = mid;
     }
-    return lo < g_native_count && g_natives[lo].address == addr ? &g_natives[lo] : NULL;
+    for (; lo < g_native_count && g_natives[lo].address == addr; ++lo) {
+        if (g_natives[lo].group == group)
+            return &g_natives[lo];
+    }
+    return NULL;
 }
 
 // The index of the function whose func_<start>() covers `addr`, or -1 if none
