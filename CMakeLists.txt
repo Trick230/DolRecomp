@@ -48,6 +48,7 @@ target_link_libraries(dr_analysis PUBLIC dr_frontend)
 
 add_library(dr_backend STATIC
     src/backend/c_cfg.c
+    src/backend/reg_locals.c
     src/backend/emitter.c
     src/backend/codegen.c
     src/backend/symbols.c)
@@ -118,7 +119,7 @@ if(DOLRECOMP_BUILD_TESTS)
         target_link_libraries(test_${test} PRIVATE dr_core)
         add_test(NAME ${test} COMMAND test_${test})
     endforeach()
-    foreach(test c_cfg)
+    foreach(test c_cfg reg_locals)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE dr_backend)
         add_test(NAME ${test} COMMAND test_${test})

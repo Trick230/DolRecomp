@@ -3,6 +3,7 @@
 
 #include "emitter.h"
 #include "backend/c_cfg.h"
+#include "backend/reg_locals.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -80,7 +81,7 @@ static void emit_ps_merge(FILE* out, const PPCInst* inst,
 }
 
 static void emit_fcompare(FILE* out, const PPCInst* inst) {
-    fprintf(out, "    ppc_fcmp_inline(ctx, %u, ctx->fpr[%u], ctx->fpr[%u], %s);\n",
+    fprintf(out, "    ctx->cr = ppc_fcmp_cr(ctx, ctx->cr, %u, ctx->fpr[%u], ctx->fpr[%u], %s);\n",
             inst->crfD, inst->rA, inst->rB,
             inst->op == PPC_OP_FCMPO ? "true" : "false");
 }
@@ -514,11 +515,35 @@ static s32 function_index_for(u32 addr) {
 // Enter the module at a run-time target through the runtime's lookup, then
 // resume at `continuation` if the callee came back there (see
 // emit_direct_call for why any other pc returns to the runtime).
+// The context takes the registers over from locals (see reg_locals.h).
+static void emit_flush(FILE* out) {
+    fputs("/*@flush*/\n", out);
+}
+
+static void emit_reload(FILE* out) {
+    fputs("/*@reload*/\n", out);
+}
+
+// At a loop or a dynamic branch, once the cycles run out. `pc` is where the
+// code goes on.
+static void emit_safepoint(FILE* out, const char* pc) {
+    fprintf(out, "            if (ctx->downcount <= 0) {\n");
+    emit_flush(out);
+    fprintf(out, "                if (dolrecomp_safepoint(ctx, %s))\n", pc);
+    fprintf(out, "                    return;\n");
+    emit_reload(out);
+    fprintf(out, "            }\n");
+}
+
+// Callers leave after this if the call didn't come back to the continuation.
 static void emit_indirect_resume(FILE* out, const char* target, u32 continuation) {
+    emit_flush(out);
     fprintf(out, "            if (dolrecomp_enter_indirect(ctx, %s) &&\n", target);
-    fprintf(out, "                ctx->pc == %s && dolrecomp_idle_pc != %s)\n",
+    fprintf(out, "                ctx->pc == %s && dolrecomp_idle_pc != %s) {\n",
             code_address(continuation), code_address(continuation));
+    emit_reload(out);
     fprintf(out, "                goto label_%08X;\n", continuation);
+    fprintf(out, "            }\n");
 }
 
 // A branch out of the function that does not link is a tail call: the callee
@@ -528,6 +553,7 @@ static void emit_tail_call(FILE* out, const PPCInst* inst) {
     const u32 target = inst->branch_target;
     const DolRecompNative* native = native_for(target);
     fprintf(out, "            ctx->pc = %s;\n", code_address(target));
+    emit_flush(out);
     if (native) {
         fprintf(out, "            {\n");
         fprintf(out, "                bool %s(CPUState* ctx);\n", native->name);
@@ -591,15 +617,18 @@ static bool emit_direct_call(FILE* out, const PPCInst* inst,
     u32 target_start = g_function_starts[target_function];
     const char* tag = function_tag(target_function);
     fprintf(out, "            ctx->pc = %s;\n", code_address(inst->branch_target));
+    emit_flush(out);
     fprintf(out, "            if (dolrecomp_direct_ok && dolrecomp_direct_ok[%u] &&\n",
             function_id(target_function));
     fprintf(out, "                dolrecomp_call_enter()) {\n");
     fprintf(out, "                void func_%s%08X(CPUState* ctx);\n", tag, target_start);
     fprintf(out, "                func_%s%08X(ctx);\n", tag, target_start);
     fprintf(out, "                dolrecomp_call_leave();\n");
-    fprintf(out, "                if (ctx->pc == %s && dolrecomp_idle_pc != %s)\n",
+    fprintf(out, "                if (ctx->pc == %s && dolrecomp_idle_pc != %s) {\n",
             code_address(continuation), code_address(continuation));
+    emit_reload(out);
     fprintf(out, "                    goto label_%08X;\n", continuation);
+    fprintf(out, "                }\n");
     fprintf(out, "            }\n");
     fprintf(out, "            return;\n");
     return true;
@@ -621,40 +650,45 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
         const char* native = native_entry ? native_entry->name : NULL;
         if (native_entry && native_entry->jump) {
             const u32 continuation = inst->address + 4u;
+            emit_flush(out);
             fprintf(out, "            {\n");
             fprintf(out, "                bool %s(CPUState* ctx);\n", native);
             fprintf(out, "                if (%s(ctx)) {\n", native);
             if (branch_target_is_local(func_start, func_end, continuation)) {
-                fprintf(out, "                    if (ctx->pc == %s && dolrecomp_idle_pc != %s)\n",
+                fprintf(out, "                    if (ctx->pc == %s && dolrecomp_idle_pc != %s) {\n",
                         code_address(continuation), code_address(continuation));
+                emit_reload(out);
                 fprintf(out, "                        goto label_%08X;\n", continuation);
+                fprintf(out, "                    }\n");
             }
             fprintf(out, "                    return;\n");
             fprintf(out, "                }\n");
             fprintf(out, "            }\n");
+            emit_reload(out);
             native = NULL;
         } else if (native &&
                    branch_target_is_local(func_start, func_end, inst->address + 4u)) {
             // The runtime's idle-loop pc must still come back to it.
             const u32 continuation = inst->address + 4u;
+            emit_flush(out);
             fprintf(out, "            {\n");
             fprintf(out, "                bool %s(CPUState* ctx);\n", native);
             fprintf(out, "                if (%s(ctx)) {\n", native);
-            fprintf(out, "                    if (dolrecomp_idle_pc != %s)\n", code_address(continuation));
+            fprintf(out, "                    if (dolrecomp_idle_pc != %s) {\n", code_address(continuation));
+            emit_reload(out);
             fprintf(out, "                        goto label_%08X;\n", continuation);
+            fprintf(out, "                    }\n");
             fprintf(out, "                    ctx->pc = %s;\n", code_address(continuation));
             fprintf(out, "                    return;\n");
             fprintf(out, "                }\n");
             fprintf(out, "            }\n");
+            emit_reload(out);
         } else {
             native = NULL;
         }
         if (local_target) {
-            if (local_backward) {
-                fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, %s))\n",
-                        code_address(inst->branch_target));
-                fprintf(out, "                return;\n");
-            }
+            if (local_backward)
+                emit_safepoint(out, code_address(inst->branch_target));
             fprintf(out, "            goto %s_%08X;\n", native ? "native_declined" : "label",
                     inst->branch_target);
         } else if (!emit_direct_call(out, inst, func_start, func_end)) {
@@ -665,9 +699,7 @@ static void emit_direct_branch(FILE* out, const PPCInst* inst,
     }
     if (local_backward) {
         if (direct_backedge) {
-            fprintf(out, "            if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, %s))\n",
-                    code_address(inst->branch_target));
-            fprintf(out, "                return;\n");
+            emit_safepoint(out, code_address(inst->branch_target));
             fprintf(out, "            goto label_%08X;\n", inst->branch_target);
         } else {
             fprintf(out, "            ctx->pc = %s;\n", code_address(inst->branch_target));
@@ -707,11 +739,11 @@ static void emit_dynamic_branch(FILE* out, const PPCInst* inst,
         if (entry_dispatch) {
             fprintf(out, "            if (target - %s < 0x%08Xu) {\n", code_address(function_address),
                     function_end - function_address);
-            fprintf(out, "                if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, target))\n");
-            fprintf(out, "                    return;\n");
+            emit_safepoint(out, "target");
             fprintf(out, "                goto entry_dispatch_%08X;\n", function_address);
             fprintf(out, "            }\n");
         }
+        emit_flush(out);
         fprintf(out, "            (void)dolrecomp_enter_indirect(ctx, target);\n");
         fprintf(out, "            return;\n");
     } else if (route_local_returns) {
@@ -1005,6 +1037,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     if (is_late_word(inst->address)) {
         const char* cia = code_address(inst->address);
+        emit_flush(out);
         fprintf(out, "    ppc_fallback_instruction(ctx, mem_read32_at(ctx, %s, %s), %s);\n", cia, cia, cia);
         fprintf(out, "    return;\n\n");
         return;
@@ -1154,7 +1187,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 res = a + b;\n");
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, b, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, b, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1169,7 +1202,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, b, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, b, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1185,7 +1218,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, b, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, b, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1199,7 +1232,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = (u32)res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | ((res >> 32) ? 0x20000000u : 0u);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(input, 0xFFFFFFFFu, (u32)res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(input, 0xFFFFFFFFu, (u32)res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1213,7 +1246,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, 0u, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, 0u, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1226,7 +1259,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 res = a + b + 1u;\n");
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, b, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, b, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1241,7 +1274,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, b, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, b, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1257,7 +1290,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, b, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, b, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1271,7 +1304,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = (u32)res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | ((res >> 32) ? 0x20000000u : 0u);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(input, 0xFFFFFFFFu, (u32)res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(input, 0xFFFFFFFFu, (u32)res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1285,7 +1318,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = res;\n", inst->rD);
         fprintf(out, "        ctx->xer = (ctx->xer & ~0x20000000u) | (((u32)(wide >> 32) & 1u) << 29);\n");
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ppc_add_overflowed(a, 0u, res));\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ppc_add_overflowed(a, 0u, res));\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1296,7 +1329,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 a = ctx->gpr[%u];\n", inst->rA);
         fprintf(out, "        ctx->gpr[%u] = (~a) + 1u;\n", inst->rD);
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, a == 0x80000000u);\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, a == 0x80000000u);\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1308,7 +1341,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
                 inst->rA, inst->rB);
         fprintf(out, "        ctx->gpr[%u] = (u32)product;\n", inst->rD);
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, product < -0x80000000ll || product > 0x7fffffffll);\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, product < -0x80000000ll || product > 0x7fffffffll);\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1340,7 +1373,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = ov ? ((dividend < 0) ? 0xFFFFFFFFu : 0u) : (u32)(dividend / divisor);\n",
                 inst->rD);
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, ov);\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, ov);\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1352,7 +1385,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        ctx->gpr[%u] = divisor == 0 ? 0u : ctx->gpr[%u] / divisor;\n",
                 inst->rD, inst->rA);
         if (inst->oe)
-            fprintf(out, "        ppc_set_xer_ov(ctx, divisor == 0);\n");
+            fprintf(out, "        ctx->xer = ppc_xer_with_ov(ctx->xer, divisor == 0);\n");
         emit_record_if_needed(out, inst, inst->rD);
         fprintf(out, "    }\n");
         break;
@@ -1816,7 +1849,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         bool lane1 = inst->op == PPC_OP_PS_CMPU1 || inst->op == PPC_OP_PS_CMPO1;
         bool ordered = inst->op == PPC_OP_PS_CMPO0 || inst->op == PPC_OP_PS_CMPO1;
         const char* bank = lane1 ? "ps1" : "fpr";
-        fprintf(out, "    ppc_fcmp_inline(ctx, %u, ctx->%s[%u], ctx->%s[%u], %s);\n",
+        fprintf(out, "    ctx->cr = ppc_fcmp_cr(ctx, ctx->cr, %u, ctx->%s[%u], ctx->%s[%u], %s);\n",
                 inst->crfD, bank, inst->rA, bank, inst->rB,
                 ordered ? "true" : "false");
         break;
@@ -1940,11 +1973,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
             else fprintf(out, "        u32 ea = 0u;\n");
             fprintf(out, "        u32 count = %uu;\n", count);
         }
+        emit_flush(out);
         fprintf(out, "        for (u32 n = 0; n < count; n++) {\n");
         fprintf(out, "            u32 reg = (%uu + n / 4u) & 31u;\n", inst->rD);
         fprintf(out, "            if ((n & 3u) == 0) ctx->gpr[reg] = 0;\n");
         fprintf(out, "            ctx->gpr[reg] |= (u32)mem_read8_at(ctx, cia, ea + n) << (24u - 8u * (n & 3u));\n");
         fprintf(out, "        }\n");
+        emit_reload(out);
         fprintf(out, "    }\n");
         break;
     }
@@ -1962,11 +1997,13 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
             else fprintf(out, "        u32 ea = 0u;\n");
             fprintf(out, "        u32 count = %uu;\n", count);
         }
+        emit_flush(out);
         fprintf(out, "        for (u32 n = 0; n < count; n++) {\n");
         fprintf(out, "            u32 reg = (%uu + n / 4u) & 31u;\n", inst->rS);
         fprintf(out, "            u8 value = (u8)(ctx->gpr[reg] >> (24u - 8u * (n & 3u)));\n");
         fprintf(out, "            mem_write8_at(ctx, cia, ea + n, value);\n");
         fprintf(out, "        }\n");
+        emit_reload(out);
         fprintf(out, "    }\n");
         break;
     }
@@ -2024,6 +2061,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_ICBI:
+        emit_flush(out);
         fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, %s);\n",
                 inst->raw, code_address(inst->address));
         fprintf(out, "    return;\n");
@@ -2039,8 +2077,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 ea = ");
         emit_dform_ea(out, inst->rA, inst->simm, false);
         fprintf(out, ";\n");
-        fprintf(out, "        for (u32 r = %u; r < 32; r++, ea += 4) ctx->gpr[r] = mem_read32_at(ctx, cia, ea);\n",
-                inst->rD);
+        for (u32 r = inst->rD; r < 32; r++)
+            fprintf(out, "        ctx->gpr[%u] = mem_read32_at(ctx, cia, ea + %uu);\n", r, (r - inst->rD) * 4u);
         fprintf(out, "    }\n");
         break;
 
@@ -2049,8 +2087,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         fprintf(out, "        u32 ea = ");
         emit_dform_ea(out, inst->rA, inst->simm, false);
         fprintf(out, ";\n");
-        fprintf(out, "        for (u32 r = %u; r < 32; r++, ea += 4) mem_write32_at(ctx, cia, ea, ctx->gpr[r]);\n",
-                inst->rS);
+        for (u32 r = inst->rS; r < 32; r++)
+            fprintf(out, "        mem_write32_at(ctx, cia, ea + %uu, ctx->gpr[%u]);\n", (r - inst->rS) * 4u, r);
         fprintf(out, "    }\n");
         break;
 
@@ -2165,7 +2203,11 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
 
     case PPC_OP_MTMSR:
         fprintf(out, "    ctx->msr = ctx->gpr[%u];\n", inst->rS);
-        fprintf(out, "    if (ctx->msr_written) ctx->msr_written(ctx);\n");
+        fprintf(out, "    if (ctx->msr_written) {\n");
+        emit_flush(out);
+        fprintf(out, "        ctx->msr_written(ctx);\n");
+        emit_reload(out);
+        fprintf(out, "    }\n");
         break;
 
     case PPC_OP_MFSR:
@@ -2216,6 +2258,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 282: fprintf(out, "    ctx->gpr[%u] = ctx->ear;\n", inst->rD); break;
         case 920: fprintf(out, "    ctx->gpr[%u] = ctx->hid2;\n", inst->rD); break;
         default:
+            emit_flush(out);
             fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, %s);\n",
                     inst->raw, code_address(inst->address));
             fprintf(out, "    return;\n");
@@ -2241,6 +2284,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         case 919: fprintf(out, "    ctx->gqr[7] = ctx->gpr[%u];\n", inst->rS); break;
         case 920: fprintf(out, "    ctx->hid2 = ctx->gpr[%u];\n", inst->rS); break;
         default:
+            emit_flush(out);
             fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, %s);\n",
                     inst->raw, code_address(inst->address));
             fprintf(out, "    return;\n");
@@ -2283,6 +2327,7 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     default:
+        emit_flush(out);
         fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, %s);\n",
                 inst->raw, code_address(inst->address));
         fprintf(out, "    return;\n");
@@ -2312,8 +2357,9 @@ static void emit_counted_loop(FILE* out, const PPCInst* insts,
     u32 loop_address = insts[first].address;
     u32 continuation = insts[last].address + 4u;
 
-    fprintf(out, "static void loop_%s%08X(CPUState* ctx) {\n", g_symbol_tag, loop_address);
+    fprintf(out, "static void loop_%s%08X(CPUState* restrict ctx) {\n", g_symbol_tag, loop_address);
     emit_flat_base(out);
+    emit_reload(out);
     fprintf(out, "label_%08X:\n", loop_address);
     fprintf(out, "    ctx->downcount -= %u;\n", cfg->block_cycles[first]);
     for (u32 i = first; i <= last; ++i) {
@@ -2321,6 +2367,7 @@ static void emit_counted_loop(FILE* out, const PPCInst* insts,
                                     function_end, i == last, false, false);
     }
     fprintf(out, "    ctx->pc = %s;\n", code_address(continuation));
+    fprintf(out, "    return;\n");
     fprintf(out, "}\n\n");
 }
 
@@ -2400,7 +2447,7 @@ static u8* sparse_entries(FILE* out, long bodies_start, const PPCInst* insts,
     return entries;
 }
 
-bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+static bool emit_function_text(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     u32 func_end = func_addr + count * 4u;
     CFunctionCFG cfg;
     if (!c_function_cfg_build(&cfg, insts, count, func_addr)) {
@@ -2420,17 +2467,21 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
                               cfg.loop_ends[i]);
     }
 
-    fprintf(out, "void func_%s%08X(CPUState* ctx) {\n", g_symbol_tag, func_addr);
+    fprintf(out, "void func_%s%08X(CPUState* restrict ctx) {\n", g_symbol_tag, func_addr);
     emit_flat_base(out);
     // A sparse entry switch goes after the bodies, once they show which
     // instructions an exit can resume at.
     const long bodies_start = g_entry_targets ? ftell(out) : -1L;
     if (bodies_start >= 0) {
         // Calls enter at the start; the switch is for resuming.
-        fprintf(out, "    if (__builtin_expect(ctx->pc == %s, 1))\n", code_address(func_addr));
+        fprintf(out, "    if (__builtin_expect(ctx->pc == %s, 1)) {\n", code_address(func_addr));
+        emit_reload(out);
         fprintf(out, "        goto label_%08X;\n", func_addr);
+        fprintf(out, "    }\n");
+        emit_reload(out);
         fprintf(out, "    goto entry_dispatch_%08X;\n", func_addr);
     } else {
+        emit_reload(out);
         emit_entry_switch(out, insts, count, func_addr, NULL);
     }
 
@@ -2440,6 +2491,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
         // tail calls, indirect calls and the runtime's dispatch.
         const DolRecompNative* native = native_for(insts[i].address);
         if (native) {
+            emit_flush(out);
             fprintf(out, "    {\n");
             fprintf(out, "        bool %s(CPUState* ctx);\n", native->name);
             fprintf(out, "        if (%s(ctx)) {\n", native->name);
@@ -2447,19 +2499,27 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
                 fprintf(out, "            return;\n");
             } else {
                 fprintf(out, "            ctx->pc = ctx->lr & ~3u;\n");
-                fprintf(out, has_local_returns ? "            goto return_dispatch_%08X;\n"
-                                               : "            return;\n", func_addr);
+                if (has_local_returns) {
+                    emit_reload(out);
+                    fprintf(out, "            goto return_dispatch_%08X;\n", func_addr);
+                } else {
+                    fprintf(out, "            return;\n");
+                }
             }
             fprintf(out, "        }\n");
             fprintf(out, "    }\n");
+            emit_reload(out);
             fprintf(out, "native_declined_%08X: __attribute__((unused));\n", insts[i].address);
         }
         if (cfg.loop_ends[i] != UINT32_MAX) {
             u32 continuation = insts[cfg.loop_ends[i]].address + 4u;
+            emit_flush(out);
             fprintf(out, "    loop_%s%08X(ctx);\n", g_symbol_tag, insts[i].address);
             if (continuation < func_end) {
-                fprintf(out, "    if (ctx->pc == %s) goto label_%08X;\n",
-                        code_address(continuation), continuation);
+                fprintf(out, "    if (ctx->pc == %s) {\n", code_address(continuation));
+                emit_reload(out);
+                fprintf(out, "        goto label_%08X;\n", continuation);
+                fprintf(out, "    }\n");
             }
             fprintf(out, "    return;\n");
             continue;
@@ -2479,6 +2539,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     {
         const s32 next = function_index_for(func_end);
         fprintf(out, "    ctx->pc = %s;\n", code_address(func_end));
+        emit_flush(out);
         if (next >= 0 && g_function_starts[next] == func_end) {
             const char* tag = function_tag(next);
             fprintf(out, "    if (dolrecomp_direct_ok && dolrecomp_direct_ok[%u] && dolrecomp_call_enter()) {\n",
@@ -2489,10 +2550,10 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
             fprintf(out, "    }\n");
         }
     }
+    fprintf(out, "    return;\n");
     if (has_local_returns) {
-        fprintf(out, "    return;\n");
         fprintf(out, "return_dispatch_%08X:\n", func_addr);
-        fprintf(out, "    if (ctx->downcount <= 0 && dolrecomp_safepoint(ctx, ctx->pc)) return;\n");
+        emit_safepoint(out, "ctx->pc");
         fprintf(out, "    switch (%s) {\n", compiled_pc());
         for (u32 i = 0; i < count; ++i) {
             if (cfg.return_targets[i]) {
@@ -2505,7 +2566,6 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     }
     if (bodies_start >= 0) {
         u8* entries = sparse_entries(out, bodies_start, insts, count, &cfg);
-        fprintf(out, "    return;\n");
         emit_entry_switch(out, insts, count, func_addr, entries);
         free(entries);
     }
@@ -2514,3 +2574,33 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
     return true;
 }
 // dear lord this thing is huge
+
+// Functions are written to a scratch file, for the rewrite and for the entry
+// switch, which reads the bodies back. Codegen runs on several threads.
+static _Thread_local FILE* g_scratch;
+
+bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+    if (!g_scratch)
+        g_scratch = tmpfile();
+    if (!g_scratch || fseek(g_scratch, 0, SEEK_END) != 0)
+        return false;
+    const long start = ftell(g_scratch);
+    if (start < 0 || !emit_function_text(g_scratch, insts, count, func_addr))
+        return false;
+    const long end = ftell(g_scratch);
+    char* text = (char*)malloc((size_t)(end - start) + 1u);
+    bool ok = text && fflush(g_scratch) == 0 && fseek(g_scratch, start, SEEK_SET) == 0;
+    if (ok) {
+        const size_t size = fread(text, 1u, (size_t)(end - start), g_scratch);
+        text[size] = '\0';
+        ok = !ferror(g_scratch) && reg_locals_rewrite(out, text, false);
+    }
+    free(text);
+    clearerr(g_scratch);
+    // The file only grows; start a new one before it gets large.
+    if (end > 64L * 1024 * 1024) {
+        fclose(g_scratch);
+        g_scratch = NULL;
+    }
+    return ok;
+}

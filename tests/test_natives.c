@@ -177,8 +177,9 @@ int main(void) {
     char* text = read_text(out_path);
     CHECK(text);
     CHECK(strstr(text, "if (host_leaf(ctx)) {\n"
-                       "                    if (dolrecomp_idle_pc != 0x80001004u)\n"
-                       "                        goto label_80001004;\n"
+                       "                    if (dolrecomp_idle_pc != 0x80001004u) {\n"));
+    CHECK(strstr(text, "goto label_80001004;\n"
+                       "                    }\n"
                        "                    ctx->pc = 0x80001004u;\n"
                        "                    return;"));
     CHECK(strstr(text, "goto native_declined_80001008;"));
@@ -232,8 +233,9 @@ int main(void) {
     text = read_text(out_path);
     CHECK(text);
     CHECK(strstr(text, "if (host_jump(ctx)) {\n"
-                       "                    if (ctx->pc == 0x80001004u && dolrecomp_idle_pc != 0x80001004u)\n"
-                       "                        goto label_80001004;\n"
+                       "                    if (ctx->pc == 0x80001004u && dolrecomp_idle_pc != 0x80001004u) {\n"));
+    CHECK(strstr(text, "goto label_80001004;\n"
+                       "                    }\n"
                        "                    return;"));
     CHECK(strstr(text, "if (host_jump(ctx)) {\n            return;"));
     free(text);

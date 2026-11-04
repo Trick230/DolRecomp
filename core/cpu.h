@@ -580,6 +580,10 @@ void ppc_cache_control(CPUState* cpu, u8 operation, u32 ea, u32 cia);
 bool ppc_add_overflowed(u32 a, u32 b, u32 result);
 bool ppc_trap_condition(u8 to, u32 a, u32 b);
 void ppc_set_xer_ov(CPUState* cpu, bool ov);
+/* The XER after setting OV to `ov`, and SO along with it. */
+static inline u32 ppc_xer_with_ov(u32 xer, bool ov) {
+    return (xer & ~0x40000000u) | (ov ? 0xC0000000u : 0u);
+}
 void ppc_take_exception(CPUState* cpu, u32 exception, u32 vector, u32 srr0, u32 srr1_info);
 void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia);
 
@@ -1021,6 +1025,20 @@ GXRUNTIME_PS_INLINE void ppc_frsp_inline(CPUState* cpu, u8 d, u8 b) {
     fpscr = (fpscr & ~0x00040000u) | ((fabs((f64)rounded) > fabs(value)) ? 0x00040000u : 0u);
     cpu->fpscr = fpscr;
     ppc_write_single_fast(cpu, d, rounded);
+}
+
+/* ppc_fcmp_inline for code keeping CR outside the state: the CR after it. */
+GXRUNTIME_PS_INLINE u32 ppc_fcmp_cr(CPUState* cpu, u32 cr, u8 crfd, f64 a, f64 b, bool ordered) {
+    if (PPC_FP_UNLIKELY(a != a || b != b)) {
+        cpu->cr = cr;
+        ppc_fcmp(cpu, crfd, a, b, ordered);
+        return cpu->cr;
+    }
+    const u32 compare = a < b ? 0x8u : a > b ? 0x4u : 0x2u;
+    const u32 shift = 4u * (7u - crfd);
+    cpu->fprf_cc = compare;
+    cpu->fprf_kind |= PPC_FPRF_CC;
+    return (cr & ~(0xFu << shift)) | (compare << shift);
 }
 
 GXRUNTIME_PS_INLINE void ppc_fcmp_inline(CPUState* cpu, u8 crfd, f64 a, f64 b, bool ordered) {
